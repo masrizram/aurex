@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Hook git pre-push — auto-deploy ke Fly.io saat main di-push ke origin.
+#
+# CATATAN DESAIN: git TIDAK punya hook "post-push" (bukan hook resmi —
+# file post-push tidak pernah dieksekusi oleh git). Solusi: pre-push hook
+# (resmi) menjadwalkan WATCHER background yang menunggu sampai
+# refs/remotes/origin/main == HEAD lokal main — kondisi yang hanya tercapai
+# SETELAH push sukses — baru menjalankan scripts/auto-deploy-fly.sh.
+# Push gagal → remote-tracking ref tidak maju → watcher timeout diam.
+#
+# Dipasang via: git config core.hooksPath .githooks (repo-local)
+# Log deploy: %LOCALAPPDATA%/Temp/fly-auto-deploy.log
+
+MAIN_SHA=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$local_ref" = "refs/heads/main" ] \
+     && [ "$local_sha" != "0000000000000000000000000000000000000000" ] \
+     && [ "$local_sha" != "$remote_sha" ]; then
+    MAIN_SHA="$local_sha"
+  fi
+done
+
+if [ -z "$MAIN_SHA" ]; then
+  exit 0  # push tidak menyentuh main (branch lain / delete) — tidak deploy
+fi
+
+echo "[pre-push] main akan di-update → auto-deploy Fly menunggu push sukses (background)."
+
+(
+  # Tunggu push sukses: refs/remotes/origin/main == sha yang di-push.
+  # Timeout 15 menit (push besar via jaringan lambat pernah 5+ menit).
+  i=0
+  while [ "$i" -lt 180 ]; do
+    if [ "$(git rev-parse refs/remotes/origin/main 2>/dev/null)" = "$MAIN_SHA" ]; then
+      exec bash scripts/auto-deploy-fly.sh
+    fi
+    sleep 5
+    i=$((i + 1))
+  done
+) &
+disown 2>/dev/null || true
+exit 0
