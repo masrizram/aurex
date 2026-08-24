@@ -34,13 +34,16 @@ export { evaluateGuard, isTerminal };
 export const QUEUE_ADVANCE = "advance";
 
 export type AgentJobKind =
-  | "research" | "rank_select" | "design_experiment" | "design_mission" | "dispatch_glm"
+  | "research" | "rank_select" | "human_select" | "design_experiment" | "design_mission" | "dispatch_glm"
   | "interpret_results" | "mission_next"; // Phase 8–9 (mission manager)
 
 export interface AgentJob {
   readonly kind: AgentJobKind;
   readonly objectiveId: string;
   readonly idem: string;
+  /** human_select: opportunity yang dipilih customer + alasan opsional. */
+  readonly opportunityId?: string;
+  readonly reason?: string;
 }
 
 export interface JobQueue {
@@ -478,8 +481,21 @@ export async function runAgentJob(
       await client.query(`UPDATE opportunities SET status = 'RANKED' WHERE cycle_id = $1`, [cycle.id]);
       const r7 = await advance(client, obj.id, "ranked", deps);
       if (!r7.ok) return fail(r7);
-      await deps.queue.enqueue({ kind: "rank_select", objectiveId: obj.id, idem: `select:${cycle.id}` });
-      return { ok: true, detail: `research → ${research.opportunities.length} opp → OPPORTUNITIES_RANKED` };
+      // §19 Gerbang otonomi: autonomy >= 3 → AUREX memilih sendiri (rank_select);
+      // autonomy <= 2 → berhenti; customer memilih via /opportunities/:oppId/select
+      // atau "Let AUREX Decide" (enqueue rank_select manual).
+      if (obj.autonomy_level >= 3) {
+        await deps.queue.enqueue({ kind: "rank_select", objectiveId: obj.id, idem: `select:${cycle.id}` });
+      } else {
+        await client.query(
+          `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
+           VALUES ($1,$2,'OPPORTUNITY_AWAITING_CHOICE',$3::jsonb,gen_random_uuid())`,
+          [obj.id, cycle.id, JSON.stringify({
+            ranked_count: research.opportunities.length,
+            message: "Opportunities siap — menunggu keputusan Anda.",
+          })]);
+      }
+      return { ok: true, detail: `research → ${research.opportunities.length} opp → OPPORTUNITIES_RANKED${obj.autonomy_level >= 3 ? " → auto rank_select" : " → menunggu pilihan manusia"}` };
     }
 
     // ── OPPORTUNITIES_RANKED: Kimi.rank_select → validasi ∈ ranked (T08) → T08
@@ -494,45 +510,8 @@ export async function runAgentJob(
           `pilihan ${sel.selected_opportunity_id} ∉ ranked list (T08) — REJECTED`);
       }
       const gatePass = !Money.parse(chosen.capitalRequired).gt(Money.parse(maxDep));
-      await client.query(`UPDATE opportunities SET status = 'SELECTED' WHERE id = $1`, [chosen.id]);
-      // ── Phase 15 Mode B (DISCOVERY): opportunity terpilih → BUSINESS VENTURE.
-      //    Objective tanpa venture mendapat identitas bisnis dari pilihan Kimi;
-      //    event BUSINESS_SELECTED tercatat di lineage (business_name di payload).
-      if (!obj.business_venture_id) {
-        const chosenFull = (await client.query<{ name: string; customer_segment: string;
-            problem: string; solution: string; business_model: string }>(
-          `SELECT name, customer_segment, problem, solution, business_model
-           FROM opportunities WHERE id = $1`, [chosen.id])).rows[0];
-        if (chosenFull) {
-          const vid = randomUUID();
-          await client.query(
-            `INSERT INTO business_ventures (id, user_id, name, industry, market, target_customer,
-               problem, solution, business_model, price, origin, source_objective_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,'KIMI_DISCOVERED',$10)`,
-            [vid, obj.user_id, chosenFull.name, obj.market, obj.market,
-             chosenFull.customer_segment, chosenFull.problem, chosenFull.solution,
-             chosenFull.business_model, obj.id]);
-          await client.query(
-            `UPDATE objectives SET business_venture_id = $1 WHERE id = $2`, [vid, obj.id]);
-          await client.query(
-            `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
-             VALUES ($1,$2,'BUSINESS_SELECTED',$3::jsonb,gen_random_uuid())`,
-            [obj.id, cycle.id, JSON.stringify({
-              venture_id: vid, business_name: chosenFull.name,
-              business_model: chosenFull.business_model, origin: "KIMI_DISCOVERED",
-            })]);
-        }
-      }
+      await applyChosenSelection(client, obj, cycle.id, chosen, sel.reason, sel.assumptions, sel.confidence, gatePass, "KIMI_AUTO");
       await flushModelRuns(client, deps.strategic, cycle.id);
-      // F11 fix: simpan reason + assumptions KIMI rank_select ke events (Q6 exposure).
-      await client.query(
-        `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
-         VALUES ($1,$2,'OPPORTUNITY_SELECTED',$3::jsonb,gen_random_uuid())`,
-        [obj.id, cycle.id, JSON.stringify({
-          opportunity_id: chosen.id, opportunity_name: chosen.name,
-          reason: sel.reason, assumptions: sel.assumptions, confidence: sel.confidence,
-          capital_gate: gatePass,
-        })]);
       const r8 = await advance(client, obj.id, "kimi_select", deps, (ctx) => ({
         ...ctx,
         selection: { inRankedList: true, capitalGatePass: gatePass },
@@ -541,6 +520,30 @@ export async function runAgentJob(
       await deps.queue.enqueue({ kind: "design_experiment", objectiveId: obj.id, idem: `exp:${cycle.id}` });
       return { ok: true, detail: `select ${chosen.id} → OPPORTUNITY_SELECTED` };
     }
+
+    // ── OPPORTUNITIES_RANKED + human choice (autonomy <= 2): pilihan customer
+    //    memakai transisi T08 yang sama — guard identik, sumber keputusan berbeda.
+    case "human_select": {
+      if (obj.state !== "OPPORTUNITIES_RANKED") return { ok: true, detail: `state=${obj.state} — skip (idempoten)` };
+      const cycle = await activeCycle(client, obj.id);
+      const ranked = await rankedList(client, cycle.id);
+      const chosen = ranked.find((r) => r.id === job.opportunityId);
+      if (!chosen) {
+        throw new OrchestratorError("GUARD_FAILED",
+          `pilihan ${job.opportunityId} ∉ ranked list (T08) — REJECTED`);
+      }
+      const gatePass = !Money.parse(chosen.capitalRequired).gt(Money.parse(maxDep));
+      await applyChosenSelection(client, obj, cycle.id, chosen, job.reason ?? "Dipilih oleh pemilik bisnis", [], null, gatePass, "HUMAN");
+      const r8h = await advance(client, obj.id, "kimi_select", deps, (ctx) => ({
+        ...ctx,
+        selection: { inRankedList: true, capitalGatePass: gatePass },
+      }));
+      if (!r8h.ok) return fail(r8h);
+      await deps.queue.enqueue({ kind: "design_experiment", objectiveId: obj.id, idem: `exp:${cycle.id}` });
+      return { ok: true, detail: `human select ${chosen.id} → OPPORTUNITY_SELECTED` };
+    }
+
+    // ── (applyChosenSelection didefinisikan di bawah switch) ──
 
     // ── OPPORTUNITY_SELECTED: Kimi.designExperiment → gate budget (T09) → [SIMULATED] T10
     case "design_experiment": {
@@ -758,6 +761,58 @@ async function insertSystemIterateDecision(
     evidence_ids: [opportunityId], metrics, assumptions: ["siklus pertama"],
     confidence: 0.5, expected_value_next: "0.00",
   };
+}
+
+/**
+ * §19 applyChosenSelection — efek samping pilihan opportunity (KIMI_AUTO maupun HUMAN):
+ * tandai SELECTED, buat venture DISCOVERY bila perlu, catat event lineage
+ * OPPORTUNITY_SELECTED (reason/assumptions/confidence + capital gate).
+ * Dipakai bersama case "rank_select" dan "human_select" — satu jalur, guard T08 tetap
+ * di advance() sehingga human choice tidak bisa bypass capital gate.
+ */
+async function applyChosenSelection(
+  client: PoolClient, obj: ObjectiveDb, cycleId: string,
+  chosen: RankedOpp, reason: string, assumptions: string[],
+  confidence: number | null, gatePass: boolean, source: "KIMI_AUTO" | "HUMAN",
+): Promise<void> {
+  await client.query(`UPDATE opportunities SET status = 'SELECTED' WHERE id = $1`, [chosen.id]);
+  // ── Phase 15 Mode B (DISCOVERY): opportunity terpilih → BUSINESS VENTURE.
+  //    Objective tanpa venture mendapat identitas bisnis dari pilihan;
+  //    event BUSINESS_SELECTED tercatat di lineage (business_name di payload).
+  if (!obj.business_venture_id) {
+    const chosenFull = (await client.query<{ name: string; customer_segment: string;
+        problem: string; solution: string; business_model: string }>(
+      `SELECT name, customer_segment, problem, solution, business_model
+       FROM opportunities WHERE id = $1`, [chosen.id])).rows[0];
+    if (chosenFull) {
+      const vid = randomUUID();
+      await client.query(
+        `INSERT INTO business_ventures (id, user_id, name, industry, market, target_customer,
+           problem, solution, business_model, price, origin, source_objective_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10,$11)`,
+        [vid, obj.user_id, chosenFull.name, obj.market, obj.market,
+         chosenFull.customer_segment, chosenFull.problem, chosenFull.solution,
+         chosenFull.business_model, source === "HUMAN" ? "HUMAN_SELECTED" : "KIMI_DISCOVERED", obj.id]);
+      await client.query(
+        `UPDATE objectives SET business_venture_id = $1 WHERE id = $2`, [vid, obj.id]);
+      await client.query(
+        `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
+         VALUES ($1,$2,'BUSINESS_SELECTED',$3::jsonb,gen_random_uuid())`,
+        [obj.id, cycleId, JSON.stringify({
+          venture_id: vid, business_name: chosenFull.name,
+          business_model: chosenFull.business_model,
+          origin: source === "HUMAN" ? "HUMAN_SELECTED" : "KIMI_DISCOVERED",
+        })]);
+    }
+  }
+  // F11 fix: simpan reason + assumptions + confidence ke events (Q6 exposure).
+  await client.query(
+    `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
+     VALUES ($1,$2,'OPPORTUNITY_SELECTED',$3::jsonb,gen_random_uuid())`,
+    [obj.id, cycleId, JSON.stringify({
+      opportunity_id: chosen.id, opportunity_name: chosen.name,
+      reason, assumptions, confidence, capital_gate: gatePass, source,
+    })]);
 }
 
 async function latestDecision(client: PoolClient, objectiveId: string): Promise<DecisionRecord> {

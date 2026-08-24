@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "vite build && npm run postbuild",
-    "postbuild": "node -e \"const fs=require('fs');fs.copyFileSync('../../packages/api/assets/index.html','../../packages/api/assets/dashboard.html');console.log('copied index.html -> dashboard.html')\"",
+    "build": "vite build && node -e \"const fs=require('fs');fs.copyFileSync('../../packages/api/assets/index.html','../../packages/api/assets/dashboard.html');fs.rmSync('../../packages/api/assets/index.html');console.log('dashboard.html synced')\"",
     "dev": "vite"
   },
   "keywords": [],

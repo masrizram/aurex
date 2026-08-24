@@ -272,8 +272,8 @@ export async function logout(): Promise<void> {
 }
 
 export async function getMe(): Promise<{
-  user: { id: string; role: string; isAdmin: boolean };
-  org: { id: string; name: string; slug: string; planTier: string; onboardingStep: number; onboardingCompleted: string | null } | null;
+  user: { id: string; email: string; role: string; isAdmin: boolean; name: string | null; emailVerified: boolean };
+  org: { id: string; name: string; slug: string; planTier: string; onboardingStep: number; onboardingCompleted: string | null; autonomyLevel: number } | null;
   usage: { credits_used: number; credits_limit: number } | null;
 }> {
   const res = await fetch(`/auth/me`, { headers: { "content-type": "application/json" } });
@@ -340,6 +340,48 @@ export async function onboardingStep5(data: { title: string; target_profit: stri
 }
 
 // ── Admin API ──────────────────────────────────────────────────────────────────
+
+// ── Auth lifecycle §6 ──
+export async function verifyEmail(token: string): Promise<{ ok: boolean }> {
+  return api("POST", "/auth/verify-email", "", { token });
+}
+export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
+  return api("POST", "/auth/forgot-password", "", { email });
+}
+export async function resetPassword(token: string, password: string): Promise<{ ok: boolean }> {
+  return api("POST", "/auth/reset-password", "", { token, password });
+}
+
+// ── Opportunity actions §19 ──
+export async function selectOpportunity(objectiveId: string, oppId: string, reason?: string, userId = ""): Promise<{ queued: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/select`, userId, { reason });
+}
+export async function letAurexDecide(objectiveId: string, userId = ""): Promise<{ queued: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/let-aurex-decide`, userId, {});
+}
+export async function rejectOpportunity(objectiveId: string, oppId: string, reason?: string, userId = ""): Promise<{ rejected: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/reject`, userId, { reason });
+}
+export async function saveOpportunity(objectiveId: string, oppId: string, note?: string, userId = ""): Promise<{ saved: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/save`, userId, { note });
+}
+
+// ── Product layer §20-27 ──
+export async function listExperiments(objectiveId: string, userId = ""): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/experiments`, userId);
+}
+export async function listMissions(objectiveId: string, userId = ""): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/missions`, userId);
+}
+export async function listResults(objectiveId: string, userId = ""): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/results`, userId);
+}
+export async function getEconomics(objectiveId: string, userId = ""): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/economics`, userId);
+}
+export async function listDecisions(objectiveId: string, userId = ""): Promise<{ decisions: any[] }> {
+  return api("GET", `/decisions?objective_id=${objectiveId}`, userId);
+}
 
 export async function adminOverview(): Promise<{ users: number; orgs: number; objectives: { count: number; state: string }[] }> {
   const res = await fetch(`/admin/overview`, { headers: { "content-type": "application/json" } });

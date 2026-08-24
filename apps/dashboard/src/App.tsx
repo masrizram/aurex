@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { getMe, logout as apiLogout } from "./api";
-import { SessionContext, type Session, USER_ID_KEY, DEFAULT_USER } from "./lib/session";
+import { SessionContext, type Session } from "./lib/session";
 import { AppShell } from "./components/AppShell";
 import { AuthPage } from "./pages/AuthPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -19,7 +19,8 @@ import { SettingsPage } from "./pages/SettingsPage";
 // ═════════════════════════════════════════════════════════════════
 // AUREX — Customer SaaS Router.
 // Navigation mengikuti mental model customer (canonical product flow),
-// BUKAN state machine backend. Raw FSM hanya di /admin.
+// BUKAN state machine backend. Raw FSM hanya di /admin (isAdmin).
+// Guard §4: anonymous → /auth/login; onboarding belum selesai → /onboarding.
 // ═════════════════════════════════════════════════════════════════
 
 type Gate = "loading" | "auth" | "onboarding" | "ready";
@@ -34,7 +35,7 @@ export function App() {
     try {
       const me = await getMe();
       const sess: Session = {
-        userId: me.user.id, email: me.user.id, role: me.user.role,
+        userId: me.user.id, email: me.user.email ?? me.user.id, role: me.user.role,
         isAdmin: me.user.isAdmin,
         orgName: me.org?.name ?? null, planTier: me.org?.planTier ?? null,
       };
@@ -42,13 +43,9 @@ export function App() {
       if (!me.org || !me.org.onboardingCompleted) setGate("onboarding");
       else setGate("ready");
     } catch {
-      // Fallback dev/demo: X-User-Id (perilaku lama)
-      try {
-        const uid = localStorage.getItem(USER_ID_KEY) || DEFAULT_USER;
-        localStorage.setItem(USER_ID_KEY, uid);
-        setSession({ userId: uid, email: "demo@aurex.local", role: "owner", isAdmin: false, orgName: "Demo Org", planTier: "FREE" });
-        setGate("ready");
-      } catch { setGate("auth"); }
+      // Anonymous: tanpa fallback dev — wajib login (§4).
+      setSession(null);
+      setGate("auth");
     }
   }, []);
 
@@ -58,15 +55,20 @@ export function App() {
   useEffect(() => {
     if (gate === "loading") return;
     const p = location.pathname;
-    if (gate === "auth" && p !== "/auth") navigate("/auth", { replace: true });
-    if (gate === "onboarding" && !p.startsWith("/onboarding") && p !== "/auth") navigate("/onboarding", { replace: true });
-    if (gate === "ready" && (p === "/" || p === "/auth" || p === "/onboarding")) navigate("/app", { replace: true });
+    // Halaman auth publik (login/signup/verify/forgot/reset) selalu boleh.
+    const onAuth = p === "/auth" || p.startsWith("/auth/");
+    if (gate === "auth" && !onAuth) navigate("/auth/login", { replace: true });
+    if (gate === "onboarding" && !p.startsWith("/onboarding") && !onAuth) {
+      navigate("/onboarding", { replace: true });
+    }
+    if (gate === "ready" && (p === "/" || onAuth || p === "/onboarding")) {
+      navigate("/app", { replace: true });
+    }
   }, [gate, location.pathname, navigate]);
 
   const handleLogout = useCallback(async () => {
     try { await apiLogout(); } catch { /* ignore */ }
-    try { localStorage.removeItem(USER_ID_KEY); } catch { /* ignore */ }
-    setSession(null); setGate("auth"); navigate("/auth", { replace: true });
+    setSession(null); setGate("auth"); navigate("/auth/login", { replace: true });
   }, [navigate]);
 
   if (gate === "loading") {
@@ -80,9 +82,14 @@ export function App() {
   return (
     <SessionContext.Provider value={session}>
       <Routes>
-        <Route path="/auth" element={<AuthPage onAuthed={() => bootstrap()} />} />
+        {/* Auth lifecycle §6 — publik */}
+        <Route path="/auth" element={<Navigate to="/auth/login" replace />} />
+        <Route path="/auth/*" element={<AuthPage onAuthed={() => bootstrap()} />} />
         <Route path="/onboarding" element={<OnboardingPage onComplete={() => { setGate("ready"); navigate("/app", { replace: true }); }} />} />
-        <Route path="/admin" element={<AdminPage onLogout={handleLogout} />} />
+        <Route path="/admin" element={
+          session?.isAdmin ? <AdminPage onLogout={handleLogout} />
+            : <Navigate to="/app" replace />
+        } />
 
         {/* Customer app — behind shell */}
         <Route path="/app" element={<AppShell onLogout={handleLogout} />}>
@@ -100,8 +107,8 @@ export function App() {
           <Route path="settings" element={<SettingsPage />} />
         </Route>
 
-        {/* Default */}
-        <Route path="*" element={<Navigate to="/app" replace />} />
+        {/* Default — unknown → landing root (landing publik diserve di /) */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </SessionContext.Provider>
   );

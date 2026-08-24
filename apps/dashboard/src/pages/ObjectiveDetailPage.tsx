@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import {
   getObjectiveDetail, listApprovals, listEvents, listOpportunities, startObjective,
   approveDecision, rejectDecision, parseApiError,
+  selectOpportunity, rejectOpportunity, saveOpportunity, letAurexDecide, listDecisions,
   type ObjectiveDetail, type Approval, type AeeEvent, type OppSummary,
 } from "../api";
 import { useSession, resolveUserId } from "../lib/session";
@@ -50,17 +51,21 @@ export function ObjectiveDetailPage() {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [events, setEvents] = useState<AeeEvent[]>([]);
   const [opps, setOpps] = useState<OppSummary[]>([]);
+  const [decisions, setDecisions] = useState<Record<string, unknown>[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [det, appr, evts, oppList] = await Promise.all([
+      const [det, appr, evts, oppList, decList] = await Promise.all([
         getObjectiveDetail(objectiveId, userId),
         listApprovals(objectiveId, userId),
         listEvents(objectiveId, userId),
         listOpportunities(objectiveId, userId),
+        listDecisions(objectiveId, userId).catch(() => ({ decisions: [] })),
       ]);
-      setDetail(det); setApprovals(appr); setEvents(evts); setOpps(oppList); setError(null);
+      setDetail(det); setApprovals(appr); setEvents(evts); setOpps(oppList);
+      setDecisions((decList as { decisions?: Record<string, unknown>[] }).decisions ?? []);
+      setError(null);
     } catch (e) { setError(parseApiError(e)); }
   }, [objectiveId, userId]);
 
@@ -130,17 +135,35 @@ export function ObjectiveDetailPage() {
         <div className="exec-block">
           {opps.length === 0 ? <p style={{ color: "#8a8a8a" }}>AUREX sedang meneliti peluang…</p> : (
             opps.map((o) => (
-              <div key={o.id} className="attn-row">
-                <div>
-                  <div style={{ color: "#fff" }}>{o.name}</div>
-                  <div style={{ color: "#8a8a8a", fontSize: 13 }}>{o.business_model}</div>
+              <div key={o.id} className="attn-row" style={{ display: "block", padding: "12px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ color: "#fff" }}>{o.name}</div>
+                    <div style={{ color: "#8a8a8a", fontSize: 13 }}>{o.business_model}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ color: "#2251ff" }}>{o.risk_adjusted_score != null ? `${o.risk_adjusted_score}` : "—"}</div>
+                    <div style={{ color: "#8a8a8a", fontSize: 12 }}>score</div>
+                  </div>
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ color: "#2251ff" }}>{o.risk_adjusted_score != null ? `${o.risk_adjusted_score}` : "—"}</div>
-                  <div style={{ color: "#8a8a8a", fontSize: 12 }}>score</div>
-                </div>
+                {o.status === "RANKED" || o.status === "DISCOVERED" ? (
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button className="btn btn--primary btn--sm" onClick={async () => { try { await selectOpportunity(objectiveId, o.id, undefined, userId); refresh(); } catch (e) { setError(parseApiError(e)); } }}>Select</button>
+                    <button className="btn btn--sm" onClick={async () => { try { await saveOpportunity(objectiveId, o.id, undefined, userId); refresh(); } catch (e) { setError(parseApiError(e)); } }}>Save</button>
+                    <button className="btn btn--danger btn--sm" onClick={async () => { try { await rejectOpportunity(objectiveId, o.id, "tidak sesuai", userId); refresh(); } catch (e) { setError(parseApiError(e)); } }}>Reject</button>
+                  </div>
+                ) : (
+                  <div style={{ marginTop: 8 }}><span style={{ color: "#8a8a8a", fontSize: 12 }}>status: {o.status}</span></div>
+                )}
               </div>
             ))
+          )}
+          {detail.status === "OPPORTUNITIES_RANKED" && (
+            <div style={{ marginTop: 16 }}>
+              <button className="btn btn--sm" onClick={async () => { try { await letAurexDecide(objectiveId, userId); refresh(); } catch (e) { setError(parseApiError(e)); } }}>
+                Let AUREX Decide (pilih otomatis terbaik)
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -154,6 +177,29 @@ export function ObjectiveDetailPage() {
               onApprove={async () => { await approveDecision(a.id, userId); refresh(); }}
               onReject={async () => { await rejectDecision(a.id, userId); refresh(); }} />
           ))}
+        </div>
+      )}
+
+      {/* Decisions history (SCALE/ITERATE/PIVOT/KILL) */}
+      {decisions.length > 0 && (
+        <div className="exec-section">
+          <div className="exec-section-title">DECISIONS</div>
+          <div className="exec-block">
+            {decisions.slice(0, 10).map((d, i) => (
+              <div key={i} className="attn-row">
+                <div>
+                  <span style={{ color: "#fff" }}>{String(d.decision ?? "—")}</span>
+                  <span style={{ color: "#8a8a8a", fontSize: 13, marginLeft: 8 }}>oleh {String(d.decided_by ?? "—")}</span>
+                  {typeof d.reason === "string" && d.reason && (
+                    <div style={{ color: "#8a8a8a", fontSize: 12, marginTop: 2 }}>{d.reason}</div>
+                  )}
+                </div>
+                <div style={{ color: "#8a8a8a", fontSize: 13 }}>
+                  {d.confidence != null ? `${Number(d.confidence).toFixed(0)}%` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

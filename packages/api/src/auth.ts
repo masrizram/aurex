@@ -3,7 +3,7 @@
  * Uses Node.js built-in crypto.scrypt for password hashing (no external deps).
  */
 /// <reference types="@fastify/cookie" />
-import { randomBytes, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
+import { randomBytes, scrypt as scryptCb, timingSafeEqual, createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { FastifyReply, FastifyRequest } from "fastify";
 
@@ -37,6 +37,23 @@ export async function verifyPassword(password: string, stored: string): Promise<
 // ── Session management ────────────────────────────────────────────────────────
 export function generateToken(): string {
   return randomBytes(32).toString("hex");
+}
+
+// ── Auth lifecycle tokens (008) — hash SHA-256, single-use, expiring ──────────
+export function hashAuthToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export async function createAuthToken(
+  client: PoolClient, userId: string, kind: "EMAIL_VERIFY" | "PASSWORD_RESET", ttlMinutes: number,
+): Promise<string> {
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
+  await client.query(
+    `INSERT INTO auth_tokens (user_id, kind, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+    [userId, kind, tokenHash, new Date(Date.now() + ttlMinutes * 60_000)],
+  );
+  return token;
 }
 
 export async function createSession(client: PoolClient, userId: string): Promise<string> {
@@ -81,6 +98,7 @@ export function setSessionCookie(reply: FastifyReply, token: string): void {
   reply.setCookie(COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
     path: "/",
     // Fastify maxAge dalam DETIK (bukan ms) — 7 hari.
     maxAge: SESSION_DAYS * 86_400,

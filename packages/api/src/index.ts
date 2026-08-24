@@ -13,7 +13,7 @@
  * executions callback, GET reads (objective/snapshot/decisions/events),
  * health. Rate limit & sesi penuh = fase hardening.
  */
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -25,7 +25,7 @@ import { dispatchJob } from "@aee/orchestrator/mission-manager";
 import { processPaymentWebhook } from "@aee/orchestrator/result-processor";
 import { CreateVentureRequestSchema } from "@aee/contracts";
 import { GlmResultSchema } from "@aee/contracts";
-import { hashPassword, verifyPassword, createSession, getSession, deleteSession, setSessionCookie, clearSessionCookie, getSessionToken, createOrgForUser, getOrgForUser, type SessionUser } from "./auth.js";
+import { hashPassword, verifyPassword, createSession, createAuthToken, hashAuthToken, getSession, deleteSession, setSessionCookie, clearSessionCookie, getSessionToken, createOrgForUser, getOrgForUser, type SessionUser } from "./auth.js";
 
 // ── Konstanta role §8 ────────────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     (req, body, done) => {
       try {
         const raw = typeof body === "string" ? body : String(body);
-        done(null, JSON.parse(raw));
+        done(null, raw.trim() === "" ? {} : JSON.parse(raw));
         rawBodies.set(req, raw);
       } catch (err) {
         done(err as Error, undefined);
@@ -223,6 +223,62 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     if (!roleAtLeast(session.role, need)) {
       throw new ApiError(403, "FORBIDDEN", `butuh role >= ${need} (dapat ${session.role})`);
     }
+  }
+
+  // ── Ownership enforcement (anti-BOLA/IDOR) ────────────────────────────────
+  // Semua aksi objek-scoped WAJIB lulus cek ini: resource harus milik user.
+  async function requireOwnedObjective(
+    client: PoolClient, objectiveId: string, session: Session,
+  ): Promise<void> {
+    const { rows } = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM objectives WHERE id = $1`, [objectiveId]);
+    if (!rows[0]) throw new ApiError(404, "NOT_FOUND", `objective ${objectiveId} tidak ada`);
+    if (rows[0].user_id !== session.userId) {
+      throw new ApiError(404, "NOT_FOUND", `objective ${objectiveId} tidak ada`);
+      // 404 (bukan 403) — jangan bocorkan keberadaan resource milik orang lain.
+    }
+  }
+
+  async function requireOwnedApproval(
+    client: PoolClient, approvalId: string, session: Session,
+  ): Promise<{ objective_id: string; status: string }> {
+    const { rows } = await client.query<{ objective_id: string; status: string; owner: string }>(
+      `SELECT a.objective_id, a.status, o.user_id AS owner
+       FROM approvals a JOIN objectives o ON o.id = a.objective_id
+       WHERE a.id = $1`, [approvalId]);
+    const ap = rows[0];
+    if (!ap || ap.owner !== session.userId) {
+      throw new ApiError(404, "NOT_FOUND", `approval ${approvalId} tidak ada`);
+    }
+    return { objective_id: ap.objective_id, status: ap.status };
+  }
+
+  // ── Rate limiting (login/signup/reset — anti brute-force) ─────────────────
+  const loginAttempts = new Map<string, { count: number; firstAt: number; blockedUntil?: number }>();
+  const RATE_WINDOW_MS = 15 * 60_000;
+  const RATE_MAX = 10;
+  function rateLimit(key: string): void {
+    const now = Date.now();
+    const st = loginAttempts.get(key);
+    if (st?.blockedUntil && st.blockedUntil > now) {
+      throw new ApiError(429, "RATE_LIMITED", `terlalu banyak percobaan — coba lagi dalam ${Math.ceil((st.blockedUntil - now) / 1000)}s`);
+    }
+    if (!st || now - st.firstAt > RATE_WINDOW_MS) {
+      loginAttempts.set(key, { count: 1, firstAt: now });
+      return;
+    }
+    st.count++;
+    if (st.count > RATE_MAX) {
+      st.blockedUntil = now + 15 * 60_000;
+      throwApi429(st.blockedUntil);
+    }
+  }
+  function rateLimitClear(key: string): void {
+    loginAttempts.delete(key);
+  }
+  function throwApi429(blockedUntilMs: number): never {
+    const secs = Math.ceil((blockedUntilMs - Date.now()) / 1000);
+    throw new ApiError(429, "RATE_LIMITED", `terlalu banyak percobaan — coba lagi dalam ${secs}s`);
   }
 
   function parseBody<T>(schema: z.ZodType<T>, raw: unknown): T {
@@ -281,15 +337,18 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   );
 
   // ── Phase 15: agent mode (REAL/MOCK) — dashboard badge ─────────────────────
-  app.get("/agent-mode", async () => {
-    const kimi = process.env.KIMI_API_KEY ? "REAL" : "MOCK";
-    const glm = process.env.GLM_API_KEY ? "REAL" : "MOCK";
-    return {
-      mode: kimi === "REAL" && glm === "REAL" ? "REAL" : (kimi === "REAL" || glm === "REAL" ? "MIXED" : "MOCK"),
-      kimi: { mode: kimi, model: process.env.KIMI_MODEL ?? "mock" },
-      glm: { mode: glm, model: process.env.GLM_MODEL ?? "mock" },
-    };
-  });
+  app.get("/agent-mode", async (req) =>
+    withClient(async (_client, session) => {
+      if (!session.isAdmin) throw new ApiError(403, "FORBIDDEN", "admin only");
+      const kimi = process.env.KIMI_API_KEY ? "REAL" : "MOCK";
+      const glm = process.env.GLM_API_KEY ? "REAL" : "MOCK";
+      return {
+        mode: kimi === "REAL" && glm === "REAL" ? "REAL" : (kimi === "REAL" || glm === "REAL" ? "MIXED" : "MOCK"),
+        kimi: { mode: kimi, model: process.env.KIMI_MODEL ?? "mock" },
+        glm: { mode: glm, model: process.env.GLM_MODEL ?? "mock" },
+      };
+    }, req),
+  );
 
   // ═══ Objectives ═══
 
@@ -375,6 +434,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.get<{ Params: { id: string } }>("/objectives/:id", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
       const o = (await client.query(
         `SELECT o.id, o.title, o.state, o.row_version, o.current_cycle, o.autonomy_level,
                 o.target_profit::text AS target_profit, o.capital_approved::text AS capital_approved,
@@ -443,6 +503,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.get<{ Params: { id: string } }>("/objectives/:id/opportunities", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
       const rows = (await client.query(
         `SELECT opp.id, opp.name, opp.status, opp.customer_segment, opp.problem, opp.solution,
                 opp.business_model, opp.capital_required::text, opp.revenue_potential::text,
@@ -460,6 +521,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post<{ Params: { id: string }; Body: unknown }>("/objectives/:id/start", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "owner");
+      await requireOwnedObjective(client, req.params.id, session);
       // G9: AI usage pre-check — jangan jalankan model kalau credit habis.
       const orgS = await getOrgForUser(client, session.userId);
       if (orgS) await checkAiCreditsAvailable(client, orgS.id, 1);
@@ -476,6 +538,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post<{ Params: { id: string }; Body: unknown }>("/objectives/:id/stop", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "owner");
+      await requireOwnedObjective(client, req.params.id, session);
       const body = parseBody(StopSchema, req.body ?? {});
       const r = await advance(client, req.params.id, "stop_objective", opts.deps);
       if (!r.ok) throw new ApiError(409, "STATE_VIOLATION", r.reason);
@@ -488,6 +551,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post<{ Params: { id: string }; Body: unknown }>("/objectives/:id/abort", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "owner");
+      await requireOwnedObjective(client, req.params.id, session);
       const body = parseBody(StopSchema, req.body ?? {});
       const r = await advance(client, req.params.id, "stop_objective", opts.deps);
       if (!r.ok) throw new ApiError(409, "STATE_VIOLATION", r.reason);
@@ -504,6 +568,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post<{ Params: { id: string } }>("/objectives/:id/retry", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "owner");
+      await requireOwnedObjective(client, req.params.id, session);
       const obj = (await client.query<{ state: string; current_cycle: number }>(
         `SELECT state, current_cycle FROM objectives WHERE id = $1`, [req.params.id])).rows[0];
       if (!obj) throw new ApiError(404, "NOT_FOUND", `objective ${req.params.id} tidak ada`);
@@ -541,14 +606,123 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     }, req),
   );
 
+  // ═══ Opportunity actions §19 (autonomy <= 2): Select / Reject / Save / Let AUREX decide ═══
+
+  // ── POST /objectives/:id/opportunities/:oppId/select — customer memilih sendiri ──
+  app.post<{ Params: { id: string; oppId: string }; Body: unknown }>(
+    "/objectives/:id/opportunities/:oppId/select",
+    async (req) =>
+      withClient(async (client, session) => {
+        requireRole(session, "owner");
+        await requireOwnedObjective(client, req.params.id, session);
+        const obj = (await client.query<{ state: string; autonomy_level: number }>(
+          `SELECT state, autonomy_level FROM objectives WHERE id = $1`, [req.params.id])).rows[0];
+        if (!obj) throw new ApiError(404, "NOT_FOUND", "objective tidak ada");
+        if (obj.state !== "OPPORTUNITIES_RANKED") {
+          throw new ApiError(409, "STATE_VIOLATION",
+            `objective state=${obj.state} — pilihan hanya tersedia saat opportunities siap`);
+        }
+        const body = parseBody(z.object({ reason: z.string().max(500).optional() }).strict(), req.body ?? {});
+        await opts.deps.queue.enqueue({
+          kind: "human_select", objectiveId: req.params.id,
+          idem: `human:${req.params.id}:${req.params.oppId}`,
+          opportunityId: req.params.oppId, reason: body.reason,
+        });
+        return { queued: true, objective: req.params.id, opportunity: req.params.oppId, source: "HUMAN" };
+      }, req),
+  );
+
+  // ── POST /objectives/:id/let-aurex-decide — delegasi pilihan ke KIMI (§19) ──
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    "/objectives/:id/let-aurex-decide",
+    async (req) =>
+      withClient(async (client, session) => {
+        requireRole(session, "owner");
+        await requireOwnedObjective(client, req.params.id, session);
+        const obj = (await client.query<{ state: string }>(
+          `SELECT state FROM objectives WHERE id = $1`, [req.params.id])).rows[0];
+        if (!obj) throw new ApiError(404, "NOT_FOUND", "objective tidak ada");
+        if (obj.state !== "OPPORTUNITIES_RANKED") {
+          throw new ApiError(409, "STATE_VIOLATION",
+            `objective state=${obj.state} — pilihan hanya tersedia saat opportunities siap`);
+        }
+        await opts.deps.queue.enqueue({
+          kind: "rank_select", objectiveId: req.params.id,
+          idem: `select:${req.params.id}:${Date.now()}`,
+        });
+        return { queued: true, objective: req.params.id, source: "KIMI_AUTO" };
+      }, req),
+  );
+
+  // ── POST /objectives/:id/opportunities/:oppId/save — simpan untuk nanti ──
+  app.post<{ Params: { id: string; oppId: string }; Body: unknown }>(
+    "/objectives/:id/opportunities/:oppId/save",
+    async (req) =>
+      withClient(async (client, session) => {
+        requireRole(session, "owner");
+        await requireOwnedObjective(client, req.params.id, session);
+        const body = parseBody(z.object({ note: z.string().max(500).optional() }).strict(), req.body ?? {});
+        const obj = (await client.query<{ state: string }>(
+          `SELECT state FROM objectives WHERE id = $1`, [req.params.id])).rows[0];
+        if (!obj) throw new ApiError(404, "NOT_FOUND", "objective tidak ada");
+        if (obj.state !== "OPPORTUNITIES_RANKED") {
+          throw new ApiError(409, "STATE_VIOLATION",
+            `objective state=${obj.state} — pilihan hanya tersedia saat opportunities siap`);
+        }
+        const upd = await client.query(
+          `UPDATE opportunities SET status = 'SAVED' WHERE id = $1 AND objective_id = $2 AND status = 'RANKED'`,
+          [req.params.oppId, req.params.id]);
+        if (upd.rowCount === 0) {
+          throw new ApiError(404, "NOT_FOUND", `opportunity ${req.params.oppId} tidak ada/bukan RANKED`);
+        }
+        await client.query(
+          `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
+           SELECT $1, c.id, 'OPPORTUNITY_SAVED', $2::jsonb, gen_random_uuid()
+           FROM cycles c WHERE c.objective_id = $1 AND c.status = 'ACTIVE'`,
+          [req.params.id, JSON.stringify({
+            opportunity_id: req.params.oppId,
+            note: body.note ?? "", saved_by: session.userId,
+          })]);
+        return { saved: true, opportunity: req.params.oppId };
+      }, req),
+  );
+
+  // ── POST /objectives/:id/opportunities/:oppId/reject — customer menolak ──
+  app.post<{ Params: { id: string; oppId: string }; Body: unknown }>(
+    "/objectives/:id/opportunities/:oppId/reject",
+    async (req) =>
+      withClient(async (client, session) => {
+        requireRole(session, "owner");
+        await requireOwnedObjective(client, req.params.id, session);
+        const body = parseBody(z.object({ reason: z.string().max(500).optional() }).strict(), req.body ?? {});
+        const obj = (await client.query<{ state: string }>(
+          `SELECT state FROM objectives WHERE id = $1`, [req.params.id])).rows[0];
+        if (!obj) throw new ApiError(404, "NOT_FOUND", "objective tidak ada");
+        if (obj.state !== "OPPORTUNITIES_RANKED") {
+          throw new ApiError(409, "STATE_VIOLATION",
+            `objective state=${obj.state} — pilihan hanya tersedia saat opportunities siap`);
+        }
+        await client.query(
+          `UPDATE opportunities SET status = 'REJECTED' WHERE id = $1 AND objective_id = $2`,
+          [req.params.oppId, req.params.id]);
+        await client.query(
+          `INSERT INTO events (objective_id, cycle_id, type, payload, correlation_id)
+           SELECT $1, c.id, 'OPPORTUNITY_REJECTED', $2::jsonb, gen_random_uuid()
+           FROM cycles c WHERE c.objective_id = $1 AND c.status = 'ACTIVE'`,
+          [req.params.id, JSON.stringify({
+            opportunity_id: req.params.oppId,
+            reason: body.reason ?? "", rejected_by: session.userId,
+          })]);
+        return { rejected: true, opportunity: req.params.oppId };
+      }, req),
+  );
+
   // ═══ Approvals (T34/T35) ═══
 
   app.post<{ Params: { id: string }; Body: unknown }>("/approvals/:id/approve", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "owner");
-      const ap = (await client.query<{ objective_id: string; status: string }>(
-        `SELECT objective_id, status FROM approvals WHERE id = $1`, [req.params.id])).rows[0];
-      if (!ap) throw new ApiError(404, "NOT_FOUND", `approval ${req.params.id} tidak ada`);
+      const ap = await requireOwnedApproval(client, req.params.id, session);
       if (ap.status === "APPROVED") return { approval: req.params.id, status: "APPROVED", idempoten: true };
       if (ap.status !== "PENDING") {
         throw new ApiError(409, "CONFLICT", `approval ${ap.status} — tidak bisa di-approve`);
@@ -585,9 +759,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     withClient(async (client, session) => {
       requireRole(session, "owner");
       const body = parseBody(ApprovalRejectSchema, req.body ?? {});
-      const ap = (await client.query<{ objective_id: string; status: string }>(
-        `SELECT objective_id, status FROM approvals WHERE id = $1`, [req.params.id])).rows[0];
-      if (!ap) throw new ApiError(404, "NOT_FOUND", `approval ${req.params.id} tidak ada`);
+      const ap = await requireOwnedApproval(client, req.params.id, session);
       if (ap.status === "REJECTED") return { approval: req.params.id, status: "REJECTED", idempoten: true };
       if (ap.status !== "PENDING") {
         throw new ApiError(409, "CONFLICT", `approval ${ap.status} — tidak bisa ditolak`);
@@ -676,10 +848,14 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       requireRole(session, "auditor");
       const q = req.query as { objective_id?: string };
       if (!q.objective_id) throw new ApiError(422, "VALIDATION_ERROR", "query objective_id wajib");
+      await requireOwnedObjective(client, q.objective_id, session);
       const rows = (await client.query(
-        `SELECT id, decision, reason, confidence::text, evidence_ids, created_at
-         FROM decisions WHERE objective_id = $1 ORDER BY created_at DESC LIMIT 100`,
-        [q.objective_id])).rows;
+        `SELECT d.id, d.decision, d.reason, d.confidence::text, d.evidence_ids, d.decided_by, d.created_at
+         FROM decisions d
+         JOIN objectives o ON o.id = d.objective_id
+         WHERE d.objective_id = $1 AND o.user_id = $2
+         ORDER BY d.created_at DESC LIMIT 100`,
+        [q.objective_id, session.userId])).rows;
       return { decisions: rows };
     }, req),
   );
@@ -699,12 +875,27 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     }, req),
   );
 
-  // ── Dashboard §36: static asset, tanpa sesi (demo). ────────────────────────
+  // ── Root routing (canonical §3): / = landing publik; /app = dashboard. ────
   app.get("/", async (_req, reply) => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const html = await readFile(join(here, "..", "assets", "landing.html"), "utf8");
+    reply.type("text/html; charset=utf-8").send(html);
+  });
+
+  const dashboardHtml = async (reply: FastifyReply) => {
     const here = dirname(fileURLToPath(import.meta.url));
     const html = await readFile(join(here, "..", "assets", "dashboard.html"), "utf8");
     reply.type("text/html; charset=utf-8").send(html);
-  });
+  };
+  app.get("/app", async (_req, reply) => dashboardHtml(reply));
+  app.get("/app/*", async (_req, reply) => dashboardHtml(reply));
+  app.get("/admin", async (_req, reply) => dashboardHtml(reply));
+  app.get("/admin/*", async (_req, reply) => dashboardHtml(reply));
+  app.get("/auth", async (_req, reply) => dashboardHtml(reply));
+  app.get("/auth/*", async (_req, reply) => dashboardHtml(reply));
+  app.get("/onboarding", async (_req, reply) => dashboardHtml(reply));
+  app.get("/onboarding/*", async (_req, reply) => dashboardHtml(reply));
+  app.get("/dashboard.html", async (_req, reply) => dashboardHtml(reply));
 
   // ── Landing page (SEO-optimized, public, no session). ──────────────────────
   app.get("/landing", async (_req, reply) => {
@@ -769,6 +960,9 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   //    sebagai owner. Jalur demo — idempoten (ON CONFLICT DO NOTHING), tanpa
   //    sesi (user belum ada). Bukan jalur produksi.
   app.post("/dev/seed-user", async (req) => {
+    if (process.env.NODE_ENV === "production") {
+      throw new ApiError(404, "NOT_FOUND", "not found");
+    }
     const uid = req.headers["x-user-id"];
     if (typeof uid !== "string" || !uid) {
       throw new ApiError(422, "VALIDATION_ERROR", "header x-user-id wajib");
@@ -802,6 +996,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post("/auth/signup", async (req, reply) => {
     // F6 fix: ZodError → 422 VALIDATION_ERROR (bukan 500 INTERNAL).
     const body = parseBody(SignupSchema, req.body);
+    rateLimit(`signup:${req.ip ?? "unknown"}`);
     const client = await opts.pool.connect();
     try {
       // Check existing
@@ -826,10 +1021,14 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       // Create org
       const orgName = body.org_name ?? `${body.name ?? body.email.split("@")[0]}'s Organization`;
       const { orgId } = await createOrgForUser(client, user!.id, orgName);
+      // Email verification token (link dikirim via email provider; dev: console)
+      const verifyToken = await createAuthToken(client, user!.id, "EMAIL_VERIFY", 24 * 60);
+      console.log(`[auth] Email verification link for ${body.email}: /auth/verify?token=${verifyToken}`);
       // Create session
       const token = await createSession(client, user!.id);
       setSessionCookie(reply, token);
-      return { user: { id: user!.id, email: user!.email, role: user!.role, name: user!.name }, org_id: orgId };
+      return { user: { id: user!.id, email: user!.email, role: user!.role, name: user!.name }, org_id: orgId,
+        verify_token_dev: process.env.NODE_ENV === "production" ? undefined : verifyToken };
     } finally {
       client.release();
     }
@@ -843,19 +1042,21 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post("/auth/login", async (req, reply) => {
     // F7 fix: ZodError → 422 VALIDATION_ERROR (bukan 500 INTERNAL).
     const body = parseBody(LoginSchema, req.body);
+    rateLimit(`login:${body.email.toLowerCase()}`);
     const client = await opts.pool.connect();
     try {
-      const { rows } = await client.query<{ id: string; email: string; role: string; name: string | null; password_hash: string; status: string }>(
-        `SELECT id, email, role, name, password_hash, status FROM users WHERE email = $1`, [body.email],
+      const { rows } = await client.query<{ id: string; email: string; role: string; name: string | null; password_hash: string; status: string; email_verified_at: string | null }>(
+        `SELECT id, email, role, name, password_hash, status, email_verified_at FROM users WHERE email = $1`, [body.email],
       );
       const user = rows[0];
       if (!user || !(await verifyPassword(body.password, user.password_hash))) {
         throw new ApiError(401, "UNAUTHORIZED", "email atau password salah");
       }
       if (user.status !== "ACTIVE") throw new ApiError(403, "FORBIDDEN", `akun ${user.status}`);
+      rateLimitClear(`login:${body.email.toLowerCase()}`);
       const token = await createSession(client, user.id);
       setSessionCookie(reply, token);
-      return { user: { id: user.id, email: user.email, role: user.role, name: user.name } };
+      return { user: { id: user.id, email: user.email, role: user.role, name: user.name }, email_verified: !!user.email_verified_at };
     } finally {
       client.release();
     }
@@ -883,8 +1084,11 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
         );
         usage = ur[0] ?? { credits_used: 0, credits_limit: 0 };
       }
+      const { rows: evRows } = await client.query<{ email: string; email_verified_at: string | null; name: string | null }>(
+        `SELECT email, email_verified_at, name FROM users WHERE id = $1`, [session.userId]);
       return {
-        user: { id: session.userId, role: session.role, isAdmin: session.isAdmin },
+        user: { id: session.userId, email: evRows[0]?.email ?? "", role: session.role, isAdmin: session.isAdmin,
+          name: evRows[0]?.name ?? null, emailVerified: !!evRows[0]?.email_verified_at },
         org: org ? { id: org.id, name: org.name, slug: org.slug, planTier: org.planTier,
           onboardingStep: org.onboardingStep, onboardingCompleted: org.onboardingCompleted,
           autonomyLevel: org.autonomyLevel } : null,
@@ -892,6 +1096,159 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       };
     }, req),
   );
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // PRODUCT LAYER: experiments / missions / results / decisions (§19-26)
+  // Semua ownership-scoped (JOIN objectives o ON ... o.user_id = session.userId)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── GET /objectives/:id/experiments (§20) ──
+  app.get<{ Params: { id: string } }>("/objectives/:id/experiments", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
+      const { rows } = await client.query(
+        `SELECT e.id, e.hypothesis, e.objective, e.budget::text AS budget, e.spent::text AS spent,
+                e.duration_days, e.success_metric, e.success_threshold::text AS success_threshold,
+                e.failure_threshold::text AS failure_threshold, e.kill_criteria, e.scale_criteria,
+                e.information_gain_target, e.status, e.result, e.measured_value::text AS measured_value,
+                e.created_at::text, opp.name AS opportunity_name
+         FROM experiments e
+         JOIN objectives o ON o.id = e.objective_id
+         LEFT JOIN opportunities opp ON opp.id = e.opportunity_id
+         WHERE e.objective_id = $1 AND o.user_id = $2
+         ORDER BY e.created_at DESC LIMIT 100`, [req.params.id, session.userId]);
+      return { experiments: rows };
+    }, req),
+  );
+
+  // ── GET /objectives/:id/missions (§21) ──
+  app.get<{ Params: { id: string } }>("/objectives/:id/missions", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
+      const { rows } = await client.query(
+        `SELECT m.id, m.status, m.priority, m.created_at::text,
+                mv.version, mv.package, mv.package_hash,
+                opp.name AS opportunity_name,
+                (SELECT count(*)::int FROM executions ex WHERE ex.mission_id = m.id) AS execution_count
+         FROM missions m
+         JOIN objectives o ON o.id = m.objective_id
+         LEFT JOIN mission_versions mv ON mv.mission_id = m.id AND mv.version = m.current_version
+         LEFT JOIN opportunities opp ON opp.id = m.opportunity_id
+         WHERE m.objective_id = $1 AND o.user_id = $2
+         ORDER BY m.created_at DESC LIMIT 100`, [req.params.id, session.userId]);
+      return { missions: rows };
+    }, req),
+  );
+
+  // ── GET /objectives/:id/results (§24 + evidence quality) ──
+  app.get<{ Params: { id: string } }>("/objectives/:id/results", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
+      const { rows } = await client.query(
+        `SELECT er.id, er.verification_tier,
+                er.revenue_claimed::text AS revenue_claimed, er.cost_claimed::text AS cost_claimed,
+                er.payload, er.created_at::text,
+                ex.status AS execution_status, m.id AS mission_id,
+                opp.name AS opportunity_name
+         FROM execution_results er
+         JOIN executions ex ON ex.id = er.execution_id
+         JOIN missions m ON m.id = ex.mission_id
+         JOIN objectives o ON o.id = m.objective_id
+         LEFT JOIN opportunities opp ON opp.id = m.opportunity_id
+         WHERE m.objective_id = $1 AND o.user_id = $2
+         ORDER BY er.created_at DESC LIMIT 100`, [req.params.id, session.userId]);
+      return { results: rows };
+    }, req),
+  );
+
+  // ── GET /objectives/:id/economics — baseline/current/target (§27) ──
+  app.get<{ Params: { id: string } }>("/objectives/:id/economics", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      await requireOwnedObjective(client, req.params.id, session);
+      const { rows: snap } = await client.query(
+        `SELECT s.revenue::text, s.gross_profit::text, s.operating_profit::text, s.roi::text,
+                s.capital_deployed::text, s.cac::text, s.ltv::text, s.ltv_cac::text, s.created_at::text
+         FROM economic_snapshots s
+         JOIN objectives o ON o.id = s.objective_id
+         WHERE s.objective_id = $1 AND o.user_id = $2
+         ORDER BY s.created_at DESC LIMIT 12`, [req.params.id, session.userId]);
+      const { rows: tgt } = await client.query(
+        `SELECT o.target_profit::text AS target_profit, o.capital_approved::text AS capital_approved
+         FROM objectives o WHERE o.id = $1 AND o.user_id = $2`, [req.params.id, session.userId]);
+      return {
+        snapshots: snap,
+        target: tgt[0] ?? null,
+        baseline: snap[snap.length - 1] ?? null,
+        current: snap[0] ?? null,
+      };
+    }, req),
+  );
+
+  // ── GET /decisions (§26) — sudah ada; pastikan ownership-scope sudah benar ──
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // AUTH LIFECYCLE (verify / forgot / reset) — §6 canonical
+  // ════════════════════════════════════════════════════════════════════════════
+
+  app.post("/auth/verify-email", async (req) => {
+    const body = parseBody(z.object({ token: z.string().min(16).max(128) }).strict(), req.body);
+    const client = await opts.pool.connect();
+    try {
+      const { rows } = await client.query<{ id: string; user_id: string; used_at: string | null; expires_at: string }>(
+        `SELECT id, user_id, used_at, expires_at FROM auth_tokens
+         WHERE token_hash = $1 AND kind = 'EMAIL_VERIFY'`, [hashAuthToken(body.token)]);
+      const t = rows[0];
+      if (!t || t.used_at || new Date(t.expires_at) < new Date()) {
+        throw new ApiError(422, "VALIDATION_ERROR", "token tidak valid atau kedaluwarsa");
+      }
+      await client.query(`UPDATE auth_tokens SET used_at = now() WHERE id = $1`, [t.id]);
+      await client.query(`UPDATE users SET email_verified_at = now() WHERE id = $1`, [t.user_id]);
+      return { ok: true, verified: true };
+    } finally { client.release(); }
+  });
+
+  app.post("/auth/forgot-password", async (req) => {
+    const body = parseBody(z.object({ email: z.string().email() }).strict(), req.body);
+    rateLimit(`forgot:${body.email.toLowerCase()}`);
+    const client = await opts.pool.connect();
+    try {
+      const { rows } = await client.query<{ id: string }>(`SELECT id FROM users WHERE email = $1`, [body.email]);
+      // Anti-enumeration: respons selalu { ok: true }.
+      if (rows[0]) {
+        const resetToken = await createAuthToken(client, rows[0].id, "PASSWORD_RESET", 60);
+        console.log(`[auth] Password reset link for ${body.email}: /auth/reset-password?token=${resetToken}`);
+      }
+      return { ok: true };
+    } finally { client.release(); }
+  });
+
+  app.post("/auth/reset-password", async (req) => {
+    const body = parseBody(z.object({
+      token: z.string().min(16).max(128),
+      password: z.string().min(8).max(128),
+    }).strict(), req.body);
+    rateLimit(`reset:${req.ip ?? "unknown"}`);
+    const client = await opts.pool.connect();
+    try {
+      const { rows } = await client.query<{ id: string; user_id: string; used_at: string | null; expires_at: string }>(
+        `SELECT id, user_id, used_at, expires_at FROM auth_tokens
+         WHERE token_hash = $1 AND kind = 'PASSWORD_RESET'`, [hashAuthToken(body.token)]);
+      const t = rows[0];
+      if (!t || t.used_at || new Date(t.expires_at) < new Date()) {
+        throw new ApiError(422, "VALIDATION_ERROR", "token tidak valid atau kedaluwarsa");
+      }
+      const pwHash = await hashPassword(body.password);
+      await client.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [pwHash, t.user_id]);
+      // Revoke semua session user (password berganti → session lama invalid)
+      await client.query(`DELETE FROM sessions WHERE user_id = $1`, [t.user_id]);
+      await client.query(`UPDATE auth_tokens SET used_at = now() WHERE id = $1`, [t.id]);
+      return { ok: true };
+    } finally { client.release(); }
+  });
 
   // ════════════════════════════════════════════════════════════════════════════
   // ONBOARDING ENDPOINTS (5-step wizard)
