@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "vite build",
+    "build": "vite build && npm run postbuild",
+    "postbuild": "node -e \"const fs=require('fs');fs.copyFileSync('../../packages/api/assets/index.html','../../packages/api/assets/dashboard.html');console.log('copied index.html -> dashboard.html')\"",
     "dev": "vite"
   },
   "keywords": [],
@@ -13,7 +14,8 @@
   "private": "true",
   "dependencies": {
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

@@ -422,9 +422,6 @@ table.data-table {
 }
 .pill[data-stage="COMPLETED"] { border-color: rgba(0, 217, 126, 0.3); color: var(--color-success); }
 .pill[data-stage="FAILED"] { border-color: rgba(255, 59, 59, 0.3); color: var(--color-error); }
-.pill[data-stage="RESEARCHING"] { border-color: rgba(0, 169, 244, 0.3); color: var(--color-highlight); }
-.pill[data-stage="DESIGNING"] { border-color: rgba(0, 169, 244, 0.3); color: var(--color-highlight); }
-.pill[data-stage="RANKING"] { border-color: rgba(0, 169, 244, 0.3); color: var(--color-highlight); }
 .pill[data-stage="APPROVED"] { border-color: rgba(0, 217, 126, 0.3); color: var(--color-success); }
 
 /* ═══ Progress bar ═══ */
@@ -636,3 +633,37 @@ table.data-table {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ══════════════ P1: App Shell (sidebar + topbar) ══════════════ */
+.shell { display: flex; min-height: 100vh; background: #000; color: #fff; }
+.shell-sidebar { width: 232px; flex-shrink: 0; border-right: 1px solid #1a1a1a; display: flex; flex-direction: column; padding: 20px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.shell-brand { font-size: 20px; font-weight: 400; letter-spacing: 2px; padding: 8px 12px 24px; cursor: pointer; color: #fff; }
+.shell-nav { flex: 1; display: flex; flex-direction: column; gap: 20px; }
+.shell-nav-group { display: flex; flex-direction: column; gap: 2px; }
+.shell-nav-section { font-size: 11px; letter-spacing: 1.5px; color: #555; padding: 0 12px 6px; font-weight: 400; }
+.shell-nav-item { display: block; padding: 8px 12px; border-radius: 8px; color: #8a8a8a; text-decoration: none; font-size: 14px; font-weight: 300; transition: color 120ms, background 120ms; }
+.shell-nav-item:hover { color: #fff; background: #111; }
+.shell-nav-item.is-active { color: #fff; background: #1a1a1a; }
+.shell-sidebar-foot { border-top: 1px solid #1a1a1a; padding-top: 12px; display: flex; flex-direction: column; gap: 4px; }
+.shell-link-btn { background: none; border: none; color: #8a8a8a; font-size: 13px; text-align: left; padding: 8px 12px; cursor: pointer; border-radius: 8px; font-weight: 300; }
+.shell-link-btn:hover { color: #fff; background: #111; }
+.shell-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.shell-topbar { display: flex; justify-content: space-between; align-items: center; padding: 16px 32px; border-bottom: 1px solid #1a1a1a; }
+.shell-topbar-org { font-size: 15px; font-weight: 400; color: #fff; }
+.shell-topbar-right { display: flex; align-items: center; gap: 16px; }
+.shell-topbar-plan { font-size: 12px; color: #2251ff; border: 1px solid #2251ff; border-radius: 12px; padding: 2px 10px; }
+.shell-topbar-acct { font-size: 13px; color: #8a8a8a; }
+.shell-content { flex: 1; padding: 32px; overflow-y: auto; }
+
+/* Executive surface stat cards */
+.exec-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 32px; }
+.exec-card { background: #111; border: 1px solid #1a1a1a; border-radius: 16px; padding: 20px; }
+.exec-card-label { font-size: 13px; color: #8a8a8a; margin-bottom: 8px; font-weight: 300; }
+.exec-card-value { font-size: 28px; font-weight: 300; color: #fff; }
+.exec-card-delta { font-size: 13px; margin-top: 4px; }
+.exec-card-delta.up { color: #00a9f4; }
+.exec-section { margin-bottom: 32px; }
+.exec-section-title { font-size: 13px; letter-spacing: 1.5px; color: #555; margin-bottom: 16px; font-weight: 400; }
+.exec-block { background: #111; border: 1px solid #1a1a1a; border-radius: 16px; padding: 24px; }
+.attn-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #1a1a1a; }
+.attn-row:last-child { border-bottom: none; }

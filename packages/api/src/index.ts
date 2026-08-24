@@ -154,6 +154,11 @@ export interface ApiOptions {
   readonly webhookSecret: string;
   /** role khusus utk callback service; default "service". */
   readonly serviceRole?: string;
+  /**
+   * Readiness probe (#1): fungsi mengembalikan status DB. Bila tidak
+   * disediakan, /health tidak mem-probe DB (liveness saja).
+   */
+  readonly dbHealth?: () => { db: "healthy" | "unhealthy"; lastError?: string | null };
 }
 
 export function buildApp(opts: ApiOptions): FastifyInstance {
@@ -234,8 +239,18 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     return v ?? null;
   }
 
-  // ═══ Health ═══
-  app.get("/health", async () => ({ status: "ok", ts: new Date().toISOString() }));
+  // ═══ Health: liveness API vs readiness DB (#1) ═══
+  app.get("/health", async () => {
+    if (!opts.dbHealth) return { status: "ok", ts: new Date().toISOString() };
+    const h = opts.dbHealth();
+    return {
+      status: h.db === "healthy" ? "ok" : "degraded",
+      api: "up",
+      db: h.db,
+      lastError: h.lastError ?? null,
+      ts: new Date().toISOString(),
+    };
+  });
 
   // ── Phase 15: Business Ventures ─────────────────────────────────────────────
   app.get("/ventures", async (req) =>

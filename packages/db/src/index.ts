@@ -10,6 +10,8 @@ import { createHash } from "node:crypto";
 
 export { Pool };
 
+export { ResilientPool, isTransientDbError, type ResilientPoolConfig, type DbHealthState } from "./resilient.js";
+
 export function ownerPool(url: string): Pool {
   return new Pool({ connectionString: url, max: 4 });
 }
