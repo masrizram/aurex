@@ -31,7 +31,8 @@ if (root) {
       <h1>Make your next economic move <span class="accent">your best one.</span></h1>
       <p class="hero-sub">AEE combines economic intelligence, AI strategy, autonomous execution, and continuous learning to help organizations identify their highest-value opportunities and turn decisions into measurable results.</p>
       <div class="hero-ctas">
-        <a href="#request-access" class="btn-primary" id="hero-request-access">Request Access</a>
+        <!-- CTA utama menuju app langsung (register/login ada di /app): journey homepage → app tanpa gap -->
+  <a href="/app" class="btn-primary" id="hero-request-access">Request Access</a>
         <a href="#modules" class="btn-secondary">Explore Platform</a>
       </div>
     </div>
@@ -287,7 +288,7 @@ if (root) {
     <div class="container">
       <h2>Ready to make your next economic move?</h2>
       <p>Request access to AEE and start turning business decisions into measurable economic outcomes.</p>
-      <a href="#" class="btn-primary">Request Access</a>
+      <a href="/app" class="btn-primary">Request Access</a>
     </div>
   </section>
 
@@ -315,10 +316,10 @@ if (root) {
         </div>
         <div class="footer-col">
           <h5>Resources</h5>
-          <a href="#">Documentation</a>
-          <a href="#">API Reference</a>
-          <a href="#">Case Studies</a>
-          <a href="#">Research</a>
+          <a href="/app">Documentation</a>
+          <a href="/app">API Reference</a>
+          <a href="/app">Case Studies</a>
+          <a href="/app">Research</a>
         </div>
       </div>
       <div class="footer-bottom">
