@@ -30,3 +30,4 @@ Thumbs.db
 # Temp
 tmp/
 *.tmp
+.fly-token
