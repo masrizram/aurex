@@ -30,7 +30,11 @@ export function evaluateGuard(key: GuardKey, t: Transition, ctx: GuardContext): 
       // Deadline efektif (GAP-07): deadline DB bila terisi, ELSE created_at+horizon
       // (deadline baris T02 diisi EFEK transisi — guard memakai nilai yang akan diisi).
       const effective = o.deadline ?? addMonths(o.createdAt, o.horizonMonths);
-      if (num(o.capitalApproved) <= 0) return { ok: false, reason: "capital_approved ≤ 0" };
+      // F3 paritas (migrasi 009): capital_approved = 0 VALID ("belajar dulu",
+      // RESEARCH-only) — hanya nilai NEGATIF yang tidak schema-valid.
+      // Sebelumnya: <= 0 ditolak → objective capital-0 dari wizard tidak bisa
+      // start (409) meski CHECK constraint sudah >= 0.
+      if (num(o.capitalApproved) < 0) return { ok: false, reason: "capital_approved < 0" };
       const deadline = new Date(`${effective}T23:59:59+07:00`); // Asia/Jakarta
       if (Number.isNaN(deadline.getTime())) return { ok: false, reason: "deadline tidak parseable" };
       if (deadline.getTime() <= ctx.now.getTime()) return { ok: false, reason: "horizon ≤ now" };
