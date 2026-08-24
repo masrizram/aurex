@@ -1,0 +1,17 @@
+# Fly.io Postgres for AEE — unmanaged single-node
+app = "aurex-db"
+primary_region = "sin"
+
+[env]
+  POSTGRES_DB = "aee"
+  POSTGRES_USER = "aee_admin"
+  PGDATA = "/var/lib/postgresql/data/pgdata"
+
+[[mounts]]
+  source = "pg_data"
+  destination = "/var/lib/postgresql/data"
+
+[vm]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
