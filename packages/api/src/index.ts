@@ -187,6 +187,17 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
 
   // Error envelope standar
   app.setErrorHandler((err, _req, reply) => {
+    // Postgres 22P02: invalid input syntax for type uuid — id bukan-UUID pada
+    // route object-scoped. Kembalikan 404 (konsisten dgn NOT_FOUND, tidak
+    // bocorkan bentuk internal / tidak 500).
+    const isInvalidUuid = err instanceof Error &&
+      /invalid input syntax for type uuid/i.test(err.message);
+    if (isInvalidUuid) {
+      void reply.status(404).send({
+        error: { code: "NOT_FOUND", message: "resource tidak ada" },
+      });
+      return;
+    }
     if (!(err instanceof ApiError)) console.error("[api-error]", err instanceof Error ? err.stack || err.message : String(err));
     if (err instanceof ApiError) {
       void reply.status(err.status).send({
