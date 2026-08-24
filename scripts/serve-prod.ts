@@ -90,3 +90,26 @@ async function shutdown(): Promise<void> {
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// ── Transient DB errors tidak menjatuhkan proses (paritas dgn serve.ts) ────
+// Fly DB restart/maintenance menghasilkan exception PG di socket idle; tanpa
+// handler ini machine prod mati. Pool self-recover menangani koneksi baru.
+const TRANSIENT_DB = /terminating|terminated unexpectedly|ECONNREFUSED|ECONNRESET|57P01|EPIPE|ETIMEDOUT|connection ended|socket hang up/i;
+process.on("uncaughtException", (err) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (TRANSIENT_DB.test(msg)) {
+    console.error("[serve-prod] pg connection drop (diabaikan):", msg);
+  } else {
+    console.error("[serve-prod] uncaught:", err);
+    process.exit(1);
+  }
+});
+process.on("unhandledRejection", (err) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (TRANSIENT_DB.test(msg)) {
+    console.error("[serve-prod] pg drop (diabaikan):", msg);
+  } else {
+    console.error("[serve-prod] unhandled:", err);
+    process.exit(1);
+  }
+});

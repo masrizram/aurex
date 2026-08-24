@@ -191,9 +191,12 @@ let worker: Awaited<ReturnType<typeof startWorker>> | null = null;
 }
 
 // ── 5. Transient DB errors tidak menjatuhkan proses ─────────────────────────
+// "Connection terminated unexpectedly" = socket idle putus saat DB restart
+// (pola crash terverifikasi 2026-08-24: exception lolos filter lama → exit(1)).
+const TRANSIENT_DB = /terminating|terminated unexpectedly|ECONNREFUSED|ECONNRESET|57P01|EPIPE|ETIMEDOUT|connection ended|socket hang up/i;
 process.on("uncaughtException", (err) => {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/terminating|ECONNREFUSED|ECONNRESET|57P01|EPIPE|ETIMEDOUT/i.test(msg)) {
+  if (TRANSIENT_DB.test(msg)) {
     console.error("[uncaught] pg connection drop (diabaikan):", msg);
   } else {
     console.error("[uncaught]", err);
@@ -202,7 +205,7 @@ process.on("uncaughtException", (err) => {
 });
 process.on("unhandledRejection", (err) => {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/terminating|ECONNREFUSED|ECONNRESET|57P01|EPIPE|ETIMEDOUT/i.test(msg)) {
+  if (TRANSIENT_DB.test(msg)) {
     console.error("[unhandled] pg connection drop (diabaikan):", msg);
   } else {
     console.error("[unhandled]", err);
