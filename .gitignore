@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment files (secrets injected via env/secret manager)
+.env
+.env.local
+.env.production
+.env.staging
+
+# Logs
+*.log
+logs/
+
+# Backups (never commit DB dumps)
+backups/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Temp
+tmp/
+*.tmp

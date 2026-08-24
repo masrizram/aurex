@@ -1,0 +1,35 @@
+{
+  "name": "aee",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous Economic Engine — scaffold (TS strict, Postgres 16, DDL canonical ddl_patched.sql)",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate": "tsx packages/db/src/migrate-cli.ts",
+    "migrate:status": "tsx packages/db/src/migrate-cli.ts --status"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.12.1",
+    "pg": "^8.12.0",
+    "pg-boss": "^10.4.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vitest": "^2.0.5",
+    "zod-to-json-schema": "^3.25.2"
+  }
+}

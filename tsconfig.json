@@ -1,0 +1,67 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": [
+      "ES2022"
+    ],
+    "strict": true,
+    "esModuleInterop": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@aee/domain": [
+        "packages/domain/src/index.ts"
+      ],
+      "@aee/money": [
+        "packages/money/src/index.ts"
+      ],
+      "@aee/contracts": [
+        "packages/contracts/src/index.ts"
+      ],
+      "@aee/economics": [
+        "packages/economics/src/index.ts"
+      ],
+      "@aee/orchestrator": [
+        "packages/orchestrator/src/index.ts"
+      ],
+      "@aee/api": [
+        "packages/api/src/index.ts"
+      ],
+      "@aee/orchestrator/runtime": [
+        "packages/orchestrator/src/runtime.ts"
+      ],
+      "@aee/orchestrator/mission-manager": [
+        "packages/orchestrator/src/mission-manager.ts"
+      ],
+      "@aee/orchestrator/result-processor": [
+        "packages/orchestrator/src/result-processor.ts"
+      ],
+      "@aee/db": [
+        "packages/db/src/index.ts"
+      ],
+      "@aee/agents": [
+        "packages/agents/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "vitest.config.ts",
+    "scripts/*.ts",
+    "apps/*/src/**/*.ts",
+    "apps/*/test/**/*.ts"
+  ],
+  "exclude": [
+    "apps/dashboard",
+    "apps/landing"
+  ]
+}
