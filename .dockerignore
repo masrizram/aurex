@@ -1,0 +1,16 @@
+node_modules
+dist
+build
+backups
+logs
+.git
+*.log
+*.md
+.env
+.env.local
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+tmp
+*.tmp
