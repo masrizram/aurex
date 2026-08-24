@@ -128,6 +128,22 @@ console.log("── OPPORTUNITY FLOW (autonomy 2 — menunggu pilihan manusia) �
 const startR = await fetch(`${BASE}/objectives/${objAId}/start`, { method: "POST", headers: H(suA.cookie), body: "{}" });
 ok("start objective A", startR.status === 200 || startR.status === 409, `got ${startR.status}`);
 
+// Pre-flight: server harus hidup sebelum suite mulai — gagal dengan pesan jelas
+// (pola notifikasi 2026-08-24: run saat server mati crash dengan stack trace
+//  `TypeError: fetch failed` yang misleading; ini menggantinya dengan diagnosis langsung)
+{
+  try {
+    const pf = await fetch(`${BASE}/health`);
+    if (pf.status !== 200) {
+      console.error(`PRE-FLIGHT FAIL: /health = ${pf.status} (harus 200). Jalankan server dulu: AEE_FORCE_MOCK=1 npx tsx scripts/serve.ts`);
+      process.exit(1);
+    }
+  } catch {
+    console.error(`PRE-FLIGHT FAIL: server ${BASE} tidak merespons. Jalankan server dulu: AEE_FORCE_MOCK=1 npx tsx scripts/serve.ts`);
+    process.exit(1);
+  }
+}
+
 // poll sampai OPPORTUNITIES_RANKED (worker research + rank)
 let state = "", opps: { id: string; status: string }[] = [];
 for (let i = 0; i < 90; i++) {
