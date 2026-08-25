@@ -62,6 +62,15 @@ npm run typecheck >>"$LOG" 2>&1 || {
   echo "[auto-deploy] TYPECHECK GAGAL — deploy dibatalkan."
   exit 1
 }
+npm run typecheck:ui >>"$LOG" 2>&1 || {
+  echo "[auto-deploy] TYPECHECK UI GAGAL — deploy dibatalkan."
+  exit 1
+}
+# Gate test UI (jsdom provider/route regression — commit 9c3ce1e).
+npm run test:ui >>"$LOG" 2>&1 || {
+  echo "[auto-deploy] TEST UI GAGAL — deploy dibatalkan."
+  exit 1
+}
 
 # 3) Deploy remote-only (build di Fly, jalur yang sama dgn manual)
 echo "[auto-deploy] 3/4 flyctl deploy --remote-only…"

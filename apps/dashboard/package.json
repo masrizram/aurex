@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
     "build": "vite build && node -e \"const fs=require('fs');fs.copyFileSync('../../packages/api/assets/index.html','../../packages/api/assets/dashboard.html');fs.rmSync('../../packages/api/assets/index.html');console.log('dashboard.html synced')\"",
     "dev": "vite"
   },
