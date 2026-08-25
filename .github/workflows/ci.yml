@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: typecheck · unit · ui · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/dashboard/package-lock.json
+
+      # Root workspaces = packages/* saja; dua app punya instalasi sendiri.
+      - name: Install (root workspaces)
+        run: npm ci
+
+      # Landing belum punya lockfile upstream — install deterministik dari manifest.
+      - name: Install (landing)
+        run: npm install --prefix apps/landing --no-audit --no-fund
+
+      - name: Install (dashboard)
+        run: npm ci --prefix apps/dashboard
+
+      - name: Typecheck (backend + scripts)
+        run: npm run typecheck
+
+      - name: Unit/integration tests (node)
+        run: npm test
+
+      - name: Typecheck UI (dashboard + landing)
+        run: npm run typecheck:ui
+
+      - name: Regression UI (jsdom provider/route)
+        run: npm run test:ui
+
+      - name: Build UI
+        run: npm run build
