@@ -5,7 +5,6 @@ import { SessionContext, type Session } from "./lib/session";
 import { ThemeProvider } from "./context/theme-provider";
 import { FontProvider } from "./context/font-provider";
 import { AuthenticatedLayout } from "./components/layout/authenticated-layout";
-import { CommandMenu } from "./components/command-menu";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthPage } from "./pages/AuthPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
@@ -122,7 +121,10 @@ export function App() {
             {/* Default — unknown → landing root (landing publik diserve di /) */}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-          <CommandMenu />
+          {/* CommandMenu TIDAK dipasang global di sini — ia dirender oleh
+              SearchProvider (search-provider.tsx), sesuai pola upstream
+              shadcn-admin. Mount global = useSearch() di luar provider =
+              crash seluruh app (P1, 2026-08-25). */}
           <Toaster position="top-right" richColors />
         </SessionContext.Provider>
       </FontProvider>
