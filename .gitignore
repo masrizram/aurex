@@ -31,3 +31,6 @@ Thumbs.db
 tmp/
 *.tmp
 .fly-token
+
+# Artefak proses lokal (laporan audit sesi kerja) — bukan bagian produk
+/reports/
