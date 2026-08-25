@@ -201,6 +201,10 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   const app = Fastify({
     logger: false,
     bodyLimit: 1_048_576,
+    // D3: di balik Fly.io reverse proxy, req.ip harus diambil dari header
+    // Fly-Client-IP (atau X-Forwarded-For) — tanpa ini semua request tampak
+    // dari IP internal Fly (rate-limit per-IP jadi tidak bermakna).
+    trustProxy: true,
   });
   // Session cookies (httpOnly, 7-day expiry)
   void app.register(import("@fastify/cookie"));
