@@ -5,6 +5,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { CreateVentureRequestSchema } from "@aee/contracts";
+import { providerModeFromEnv } from "@aee/agents";
 import { ApiError, type RouteCtx } from "../context.js";
 
 /** Daftarkan rute inti (health / ventures / agent-mode). */
@@ -55,13 +56,7 @@ export function registerCoreRoutes(app: FastifyInstance, ctx: RouteCtx): void {
   app.get("/agent-mode", async (req) =>
     withClient(async (_client, session) => {
       if (!session.isAdmin) throw new ApiError(403, "FORBIDDEN", "admin only");
-      const kimi = process.env.KIMI_API_KEY ? "REAL" : "MOCK";
-      const glm = process.env.GLM_API_KEY ? "REAL" : "MOCK";
-      return {
-        mode: kimi === "REAL" && glm === "REAL" ? "REAL" : (kimi === "REAL" || glm === "REAL" ? "MIXED" : "MOCK"),
-        kimi: { mode: kimi, model: process.env.KIMI_MODEL ?? "mock" },
-        glm: { mode: glm, model: process.env.GLM_MODEL ?? "mock" },
-      };
+      return providerModeFromEnv();
     }, req),
   );
 }

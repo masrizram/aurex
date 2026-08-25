@@ -452,6 +452,50 @@ const KIMI_TEMPERATURE: Record<string, number> = {
   interpret_results: 1,
 };
 
+/**
+ * §23 — konfigurasi provider dibaca dari environment di SATU tempat.
+ * Adapter menerima override via cfg; default selalu berasal dari sini.
+ */
+export type ProviderConfig = {
+  kimi: { baseUrl: string; apiKey: string; model: string; promptVersion: string };
+  glm: { baseUrl: string; apiKey: string; model: string; promptVersion: string };
+  forceMock: boolean;
+};
+
+export function providerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ProviderConfig {
+  return {
+    kimi: {
+      baseUrl: env.KIMI_BASE_URL ?? "https://api.moonshot.ai/v1",
+      apiKey: env.KIMI_API_KEY ?? "",
+      model: env.KIMI_MODEL ?? "kimi-k3",
+      promptVersion: env.KIMI_PROMPT_VERSION ?? "1",
+    },
+    glm: {
+      baseUrl: env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
+      apiKey: env.GLM_API_KEY ?? "",
+      model: env.GLM_MODEL ?? "glm-4.6",
+      promptVersion: env.GLM_PROMPT_VERSION ?? "1",
+    },
+    forceMock: Boolean(env.AEE_FORCE_MOCK),
+  };
+}
+
+/** Semantik badge admin `/agent-mode`: provider REAL jika key terpasang (display saja). */
+export function providerModeFromEnv(env: NodeJS.ProcessEnv = process.env) {
+  const kimi = env.KIMI_API_KEY ? ("REAL" as const) : ("MOCK" as const);
+  const glm = env.GLM_API_KEY ? ("REAL" as const) : ("MOCK" as const);
+  return {
+    mode:
+      kimi === "REAL" && glm === "REAL"
+        ? ("REAL" as const)
+        : kimi === "REAL" || glm === "REAL"
+          ? ("MIXED" as const)
+          : ("MOCK" as const),
+    kimi: { mode: kimi, model: env.KIMI_MODEL ?? "mock" },
+    glm: { mode: glm, model: env.GLM_MODEL ?? "mock" },
+  };
+}
+
 export class KimiAdapter implements StrategicAgentProvider {
   private readonly transport: ChatTransport;
   private readonly model: string;
@@ -463,15 +507,13 @@ export class KimiAdapter implements StrategicAgentProvider {
   readonly runs: ModelRunRecord[] = [];
 
   constructor(cfg: KimiAdapterConfig = {}) {
-    this.transport = cfg.transport ?? fetchTransport(
-      process.env.KIMI_BASE_URL ?? "https://api.moonshot.ai/v1",
-      process.env.KIMI_API_KEY ?? "",
-    );
-    this.model = cfg.model ?? process.env.KIMI_MODEL ?? "kimi-k3";
+    const kc = providerConfigFromEnv().kimi;
+    this.transport = cfg.transport ?? fetchTransport(kc.baseUrl, kc.apiKey);
+    this.model = cfg.model ?? kc.model;
     this.tokenLimit = cfg.tokenLimit ?? 8192;
     this.sleeper = cfg.sleeper ?? realSleep;
     this.clock = cfg.clock ?? Date.now;
-    this.promptVersion = cfg.promptVersion ?? process.env.KIMI_PROMPT_VERSION ?? "1";
+    this.promptVersion = cfg.promptVersion ?? kc.promptVersion;
   }
 
   private async call<T>(purpose: string, schema: z.ZodType<T>, input: unknown, postValidate?: (v: T) => void): Promise<T> {
@@ -542,15 +584,13 @@ export class GlmAdapter implements ExecutionAgentProvider {
   readonly runs: ModelRunRecord[] = [];
 
   constructor(cfg: GlmAdapterConfig = {}) {
-    this.transport = cfg.transport ?? fetchTransport(
-      process.env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
-      process.env.GLM_API_KEY ?? "",
-    );
-    this.model = cfg.model ?? process.env.GLM_MODEL ?? "glm-4.6";
+    const gc = providerConfigFromEnv().glm;
+    this.transport = cfg.transport ?? fetchTransport(gc.baseUrl, gc.apiKey);
+    this.model = cfg.model ?? gc.model;
     this.tokenLimit = cfg.tokenLimit ?? 8192;
     this.sleeper = cfg.sleeper ?? realSleep;
     this.clock = cfg.clock ?? Date.now;
-    this.promptVersion = cfg.promptVersion ?? process.env.GLM_PROMPT_VERSION ?? "1";
+    this.promptVersion = cfg.promptVersion ?? gc.promptVersion;
   }
 
   /** §10-1/2: strict TANPA repair + referensi wajib cocok (anti-halusinasi). */
@@ -868,14 +908,13 @@ export function createAgents(opts?: {
   strategic?: StrategicAgentProvider;
   execution?: ExecutionAgentProvider;
 }): AgentDeps {
-  const kimiKey = process.env.KIMI_API_KEY ?? "";
-  const glmKey = process.env.GLM_API_KEY ?? "";
+  const pc = providerConfigFromEnv();
 
-  if (kimiKey && glmKey && !process.env.AEE_FORCE_MOCK) {
+  if (pc.kimi.apiKey && pc.glm.apiKey && !pc.forceMock) {
     const strategic = opts?.strategic ?? new KimiAdapter();
     const execution = opts?.execution ?? new GlmAdapter();
-    const kModel = process.env.KIMI_MODEL ?? "kimi-k3";
-    const gModel = process.env.GLM_MODEL ?? "glm-4.6";
+    const kModel = pc.kimi.model;
+    const gModel = pc.glm.model;
     return {
       strategic,
       execution,
