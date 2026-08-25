@@ -390,6 +390,17 @@ export async function listDecisions(objectiveId: string): Promise<{ decisions: a
   return api("GET", `/decisions?objective_id=${objectiveId}`);
 }
 
+// ── Billing ──
+export type BillingPlan = {
+  plan: { tier: string; name: string; price_monthly: string; max_ai_credits_monthly: number };
+  subscription: { status: string; plan_id: string; current_period_end: string | null } | null;
+  usage: { credits_used: number; credits_limit: number };
+};
+
+export async function getBillingPlan(): Promise<BillingPlan> {
+  return api<BillingPlan>("GET", "/billing/plan");
+}
+
 export async function adminOverview(): Promise<{ users: number; orgs: number; objectives: { count: number; state: string }[] }> {
   const res = await fetch(`/admin/overview`, { headers: { "content-type": "application/json" } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/sidebar'
 import { SignOutDialog } from '@/components/sign-out-dialog'
 import { getDisplayNameInitials } from '@/lib/utils'
+import { logout } from '@/api'
 
 type NavUserProps = {
   user: {
@@ -122,7 +123,7 @@ export function NavUser({ user }: NavUserProps) {
         onOpenChange={setOpen}
         onSignOut={async () => {
           try {
-            await fetch('/auth/logout', { method: 'POST' })
+            await logout()
           } catch {
             /* best-effort */
           }

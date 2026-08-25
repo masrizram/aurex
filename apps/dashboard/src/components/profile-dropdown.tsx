@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { SignOutDialog } from '@/components/sign-out-dialog'
 import { getDisplayNameInitials } from '@/lib/utils'
+import { logout } from '@/api'
 import type { Session } from '@/lib/session'
 
 export function ProfileDropdown({ session }: { session: Session | null }) {
@@ -75,7 +76,7 @@ export function ProfileDropdown({ session }: { session: Session | null }) {
         onOpenChange={setOpen}
         onSignOut={async () => {
           try {
-            await fetch('/auth/logout', { method: 'POST' })
+            await logout()
           } catch {
             /* best-effort */
           }

@@ -17,7 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useTheme } from "@/context/theme-provider";
-import { getMe } from "@/api";
+import { getBillingPlan, getMe } from "@/api";
 import { useSession } from "@/lib/session";
 import { fmtNum } from "@/components/aurex-primitives";
 
@@ -174,10 +174,10 @@ const PLANS = [
 
 function BillingSection() {
   const [me, setMe] = useState<Awaited<ReturnType<typeof getMe>> | null>(null);
-  const [plan, setPlan] = useState<{ plan: any; usage: any } | null>(null);
+  const [plan, setPlan] = useState<Awaited<ReturnType<typeof getBillingPlan>> | null>(null);
   useEffect(() => {
     getMe().then(setMe).catch(() => {});
-    fetch("/billing/plan").then((r) => r.json()).then(setPlan).catch(() => {});
+    getBillingPlan().then(setPlan).catch(() => {});
   }, []);
   const currentTier = (plan?.plan?.tier ?? me?.org?.planTier ?? "FREE").toUpperCase();
   const creditsUsed = plan?.usage?.credits_used ?? 0;
