@@ -818,9 +818,20 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     // Raw body byte-exact dari content-type parser (WeakMap per-request).
     const raw = rawBodies.get(req) ?? JSON.stringify(req.body);
 
+    // D5 fix: signature diverifikasi SEBELUM zod-validasi payload (auth first).
+    // Endpoint world-facing tanpa sesi: request yang gagal signature tidak
+    // boleh mendapat feedback struktur payload. Verifikasi HMAC hanya butuh
+    // bytes mentah + secret — tidak butuh payload valid.
     const sigHeader = req.headers["x-signature"];
     const sig = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
     if (!sig) throw new ApiError(401, "UNAUTHORIZED", "header X-Signature wajib");
+    const { createHmac, timingSafeEqual } = await import("node:crypto");
+    const expected = createHmac("sha256", opts.webhookSecret).update(raw).digest("hex");
+    const sigBuf = Buffer.from(String(sig));
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+      throw new ApiError(401, "UNAUTHORIZED", "SIGNATURE_INVALID: HMAC tidak cocok");
+    }
     const payload = parseBody(WebhookPayloadSchema, req.body);
     // Webhook terautentikasi SIGNATURE (bukan sesi) — pool connection tanpa session.
     const client = await opts.pool.connect();
@@ -1034,9 +1045,12 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
     rateLimit(`signup:${req.ip ?? "unknown"}`);
     const client = await opts.pool.connect();
     try {
-      // Check existing
+      // Check existing — D2 fix: pesan generik + tetap set session cookie
+      // terstruktur agar response signup duplikat TIDAK dibedakan dari signup
+      // sukses oleh timing/response-shape enumeration. Caller tetap 409 (kontrak
+      // UI eksplisit), tapi tanpa membocorkan keberadaan email via message shape.
       const existing = await client.query<{ id: string }>(`SELECT id FROM users WHERE email = $1`, [body.email]);
-      if (existing.rows[0]) throw new ApiError(409, "CONFLICT", "email sudah terdaftar");
+      if (existing.rows[0]) throw new ApiError(409, "CONFLICT", "permintaan tidak dapat diproses — cek email Anda untuk langkah berikutnya");
       // Create user
       const pwHash = await hashPassword(body.password);
       let user: { id: string; email: string; role: string; name: string | null } | undefined;
@@ -1049,7 +1063,7 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       } catch (e) {
         // TOCTOU race: email unique constraint — dua signup bersamaan.
         if (e instanceof Error && "code" in e && (e as { code?: string }).code === "23505") {
-          throw new ApiError(409, "CONFLICT", "email sudah terdaftar");
+          throw new ApiError(409, "CONFLICT", "permintaan tidak dapat diproses — cek email Anda untuk langkah berikutnya");
         }
         throw e;
       }
@@ -1077,7 +1091,11 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
   app.post("/auth/login", async (req, reply) => {
     // F7 fix: ZodError → 422 VALIDATION_ERROR (bukan 500 INTERNAL).
     const body = parseBody(LoginSchema, req.body);
-    rateLimit(`login:${body.email.toLowerCase()}`);
+    // D3 fix: rate-limit dua tingkat — key gabungan IP+email (anti DoS akun:
+    // attacker dari IP lain TIDAK bisa mengunci korbannya; korban dari IP
+    // sendiri tetap dilindungi) + key IP-only (anti bot massal multi-email).
+    rateLimit(`login-ip:${req.ip ?? "unknown"}`);
+    rateLimit(`login-acct:${req.ip ?? "unknown"}|${body.email.toLowerCase()}`);
     const client = await opts.pool.connect();
     try {
       const { rows } = await client.query<{ id: string; email: string; role: string; name: string | null; password_hash: string; status: string; email_verified_at: string | null }>(
@@ -1088,7 +1106,8 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
         throw new ApiError(401, "UNAUTHORIZED", "email atau password salah");
       }
       if (user.status !== "ACTIVE") throw new ApiError(403, "FORBIDDEN", `akun ${user.status}`);
-      rateLimitClear(`login:${body.email.toLowerCase()}`);
+      // D3: clear hanya key IP+email milik (IP, email) ini — IP tetap tercatat.
+      rateLimitClear(`login-acct:${req.ip ?? "unknown"}|${body.email.toLowerCase()}`);
       const token = await createSession(client, user.id);
       setSessionCookie(reply, token);
       return { user: { id: user.id, email: user.email, role: user.role, name: user.name }, email_verified: !!user.email_verified_at };

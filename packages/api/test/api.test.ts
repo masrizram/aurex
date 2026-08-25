@@ -156,6 +156,33 @@ describe("Webhook pembayaran", () => {
     expect(res.statusCode).toBe(401);
     expect(res.json().error.code).toBe("UNAUTHORIZED");
   });
+
+  // D5: signature diverifikasi SEBELUM zod-validasi payload — payload invalid
+  // + signature salah harus 401 (auth first), bukan 422 (feedback struktur).
+  it("D5: payload invalid + signature salah → 401 (bukan 422)", async () => {
+    const app = appWith(() => ({ rows: [], rowCount: 0 } as unknown as QueryResult));
+    const res = await app.inject({
+      method: "POST", url: "/webhooks/payments/xendit",
+      payload: { wrong_field: true }, // schema-invalid
+      headers: { "x-signature": "deadbeef" },
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error.code).toBe("UNAUTHORIZED");
+  });
+
+  // D5: payload valid + signature BENAR → zod-validasi jalan (422 utk body invalid,
+  // atau diproses). Signature benar atas payload invalid → 422 (bukan 401).
+  it("D5: signature benar + payload invalid → 422 (validasi jalan setelah auth)", async () => {
+    const app = appWith(() => ({ rows: [], rowCount: 0 } as unknown as QueryResult));
+    const badBody = JSON.stringify({ wrong_field: true });
+    const sig = createHmac("sha256", WH_SECRET).update(badBody).digest("hex");
+    const res = await app.inject({
+      method: "POST", url: "/webhooks/payments/xendit",
+      payload: { wrong_field: true },
+      headers: { "x-signature": sig },
+    });
+    expect(res.statusCode).toBe(422);
+  });
 });
 
 describe("GET /objectives/:id & reads", () => {
@@ -251,7 +278,70 @@ describe("Dashboard endpoints (§36)", () => {
   });
 });
 
-// ═══ D1: Billing entitlement enforcement (quota objective per plan) ═════════
+// ═══ D2/D3: signup enumeration + login rate-limit key ════════════════════════
+describe("D2 signup enumeration + D3 login rate-limit", () => {
+  const SESSION_OWNER_ROW = { rows: [{ role: "owner", is_admin: false }], rowCount: 1 };
+
+  function authPool() {
+    return makePool((text) => {
+      // signup: existing check
+      if (text.includes("SELECT id FROM users WHERE email")) {
+        return { rows: [{ id: "u-exist" }], rowCount: 1 } as unknown as QueryResult; // email sudah ada
+      }
+      return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    });
+  }
+
+  it("D2: signup duplikat → 409 dengan pesan generik (tanpa 'email sudah terdaftar')", async () => {
+    const app = buildApp({ pool: authPool(), deps: deps(), webhookSecret: WH_SECRET });
+    const res = await app.inject({
+      method: "POST", url: "/auth/signup",
+      payload: { email: "ada@example.com", password: "Passw0rd!x" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.message).not.toContain("email sudah terdaftar");
+    expect(res.json().error.message).toContain("cek email Anda");
+  });
+
+  it("D3: 11x login salah dari IP sama → 429 RATE_LIMITED", async () => {
+    // pool: user tidak ditemukan → 401 tiap percobaan
+    const pool = makePool(() => ({ rows: [], rowCount: 0 } as unknown as QueryResult));
+    const app = buildApp({ pool, deps: deps(), webhookSecret: WH_SECRET });
+    const email = "victim@example.com";
+    let last = 0;
+    for (let i = 0; i < 11; i += 1) {
+      const r = await app.inject({
+        method: "POST", url: "/auth/login",
+        payload: { email, password: "wrong-pass" },
+        remoteAddress: "203.0.113.7",
+      });
+      last = r.statusCode;
+    }
+    expect(last).toBe(429);
+    expect([401, 429]).toContain(last);
+  });
+
+  it("D3: rate-limit tidak mengunci akun korban dari IP BERBEDA (anti-DoS akun)", async () => {
+    const pool = makePool(() => ({ rows: [], rowCount: 0 } as unknown as QueryResult));
+    const app = buildApp({ pool, deps: deps(), webhookSecret: WH_SECRET });
+    const email = "victim2@example.com";
+    // attacker dari IP A mengisi rate-limit 11x
+    for (let i = 0; i < 11; i += 1) {
+      await app.inject({
+        method: "POST", url: "/auth/login",
+        payload: { email, password: "wrong" },
+        remoteAddress: "203.0.113.99",
+      });
+    }
+    // korban dari IP B tetap bisa mencoba (tidak 429)
+    const r = await app.inject({
+      method: "POST", url: "/auth/login",
+      payload: { email, password: "wrong" },
+      remoteAddress: "198.51.100.5",
+    });
+    expect(r.statusCode).not.toBe(429);
+  });
+});
 // Bukti bug: user FREE bisa buat 3+ objective via onboarding step5 (jalur
 // tanpa quota check). Fix: checkObjectiveQuota dipasang di SEMUA jalur create.
 describe("D1 billing quota — FREE max 1 objective", () => {
