@@ -15,7 +15,7 @@
  * Production (Fly.io) memakai scripts/serve-prod.ts — tidak ada logika WSL.
  */
 import "dotenv/config";
-import { ResilientPool } from "@aee/db";
+import { ResilientPool, devDbUrl, devDbPassword } from "@aee/db";
 import { buildApp } from "@aee/api";
 import { createAgents } from "@aee/agents";
 import { PgBossQueue } from "@aee/orchestrator/runtime";
@@ -51,7 +51,7 @@ async function devProbeUrl(): Promise<string | null> {
     finally { await pool.end().catch(() => {}); }
   };
   // Kandidat: env port → localhost + IP WSL (dev-only; tidak pernah menulis
-  // nilai ini ke kode/config prod).
+  // nilai ini ke kode/config prod). Password dari env (§24, devDbUrl).
   const port = process.env.AEE_DB_PORT ?? "55433";
   const ip = await new Promise<string>((resolve) => {
     execFile("wsl.exe", ["-e", "bash", "-c", "hostname -I | awk '{print $1}'"],
@@ -59,7 +59,7 @@ async function devProbeUrl(): Promise<string | null> {
   });
   const candidates = [ip, "localhost"].filter(Boolean);
   for (const host of candidates) {
-    const url = `postgres://postgres:auditpass@${host}:${port}/aee`;
+    const url = devDbUrl("postgres", host, port);
     if (await probe(url)) { console.log(`[serve] dev probe: DB host ${host}`); return url; }
   }
   return null;
@@ -184,7 +184,7 @@ let worker: Awaited<ReturnType<typeof startWorker>> | null = null;
       const { execFile } = await import("node:child_process");
       console.log("[serve] DB down — mencoba start container dev (AEE_DEV_PROBE=1)…");
       execFile("wsl.exe", ["-e", "bash", "-c",
-        "docker start aee-orch-pg 2>/dev/null || docker run -d --name aee-orch-pg --restart unless-stopped -v aee-orch-data:/var/lib/postgresql/data -e POSTGRES_PASSWORD=auditpass -e POSTGRES_DB=aee -p 0.0.0.0:55433:5432 postgres:16-alpine"],
+        `docker start aee-orch-pg 2>/dev/null || docker run -d --name aee-orch-pg --restart unless-stopped -v aee-orch-data:/var/lib/postgresql/data -e POSTGRES_PASSWORD=${devDbPassword()} -e POSTGRES_DB=aee -p 0.0.0.0:55433:5432 postgres:16-alpine`],
         { timeout: 60_000 }, () => { /* best effort */ });
     })(); }, 15_000).unref?.();
   }

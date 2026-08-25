@@ -12,6 +12,26 @@ export { Pool };
 
 export { ResilientPool, isTransientDbError, type ResilientPoolConfig, type DbHealthState } from "./resilient.js";
 
+// ── Kredensial DB dev/scratch (§24 secret safety) ────────────────────────────
+// Password kontainer Postgres dev TIDAK PERNAH ditulis literal di source.
+// Sumber: env AEE_DEV_DB_PASSWORD (lihat .env.example). Dipakai hanya oleh
+// tooling lokal (orch_reset.sh, verify_pipeline.sh) — produksi selalu env.
+export function devDbPassword(): string {
+  const pw = process.env.AEE_DEV_DB_PASSWORD;
+  if (!pw || !pw.trim()) {
+    throw new Error(
+      "[aee/db] AEE_DEV_DB_PASSWORD tidak diset — kredensial dev tidak boleh " +
+      "di-hardcode di source. Salin .env.example → .env lalu isi nilainya.",
+    );
+  }
+  return pw.trim();
+}
+
+/** Bangun URL postgres utk host/port/user dev dengan password dari env. */
+export function devDbUrl(user: string, host: string, port: string | number, database = "aee"): string {
+  return `postgres://${encodeURIComponent(user)}:${encodeURIComponent(devDbPassword())}@${host}:${port}/${database}`;
+}
+
 export function ownerPool(url: string): Pool {
   return new Pool({ connectionString: url, max: 4 });
 }

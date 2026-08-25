@@ -11,8 +11,10 @@ LOG=scripts/verify_output.log
 : > "$LOG"
 
 AEE_DB_HOST="${AEE_DB_HOST:-localhost}"   # override dgn IP WSL bila port-forward drop koneksi
-export DATABASE_URL="postgres://postgres:auditpass@${AEE_DB_HOST}:55433/aee"
-export DATABASE_APP_URL="postgres://aee_app:auditpass@${AEE_DB_HOST}:55433/aee"
+# §24 secret safety: password kontainer dev dari env (lihat .env.example).
+: "${AEE_DEV_DB_PASSWORD:?Set AEE_DEV_DB_PASSWORD di .env (salin dari .env.example)}"
+export DATABASE_URL="postgres://postgres:${AEE_DEV_DB_PASSWORD}@${AEE_DB_HOST}:55433/aee"
+export DATABASE_APP_URL="postgres://aee_app:${AEE_DEV_DB_PASSWORD}@${AEE_DB_HOST}:55433/aee"
 
 wsl.exe bash /mnt/c/laraenv/www/econos/scripts/orch_reset.sh >> "$LOG" 2>&1
 if ! grep -q CONTAINER_READY "$LOG"; then echo "CONTAINER_FAIL"; exit 1; fi
@@ -27,7 +29,7 @@ fi
 
 # aktifkan login aee_app (role dibuat migration 001; password = kredensial scratch)
 wsl.exe docker exec aee-orch-pg psql -U postgres -d aee \
-  -c "ALTER ROLE aee_app LOGIN PASSWORD 'auditpass'" >> "$LOG" 2>&1
+  -c "ALTER ROLE aee_app LOGIN PASSWORD '${AEE_DEV_DB_PASSWORD}'" >> "$LOG" 2>&1
 
 ./node_modules/.bin/tsx scripts/verify-db.ts >> "$LOG" 2>&1
 DB_EXIT=$?

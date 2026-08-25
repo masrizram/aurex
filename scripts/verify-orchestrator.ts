@@ -32,8 +32,13 @@ import {
 } from "@aee/orchestrator/runtime";
 import { dispatchJob } from "@aee/orchestrator/mission-manager";
 import { MockStrategicAgent, MockExecutionAgent } from "@aee/agents";
+import { devDbUrl } from "@aee/db";
 
-const APP_URL = process.env.DATABASE_APP_URL ?? "postgres://aee_app:auditpass@localhost:55433/aee";
+// §24 secret safety: kredensial hanya dari env (fallback URL dev dihapus).
+const APP_URL = process.env.DATABASE_APP_URL ?? (() => {
+  try { return devDbUrl("aee_app", "localhost", 55433); }
+  catch (e) { console.error((e as Error).message); process.exit(1); }
+})();
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET ?? "whsec-verify-local";
 const advance = advanceDb;
 

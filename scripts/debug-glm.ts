@@ -9,7 +9,12 @@ import { GlmResultSchema } from "@aee/contracts";
 import { fetchTransport, parseModelJson } from "@aee/agents";
 import "dotenv/config";
 
-const url = process.env.DATABASE_URL ?? "postgresql://aee_app:auditpass@172.17.81.243:55433/aee";
+// §24 secret safety: kredensial hanya dari env — tanpa fallback literal/IP.
+const url = process.env.DATABASE_URL;
+if (!url) {
+  console.error("[debug-glm] DATABASE_URL wajib diset (salin .env.example → .env).");
+  process.exit(1);
+}
 const pool = new Pool({ connectionString: url });
 
 const objId = process.argv[2] ?? "1c43ae94-184c-43d8-bef7-2ac76846ed4e";
