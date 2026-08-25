@@ -1439,10 +1439,13 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
         `SELECT credits_used, credits_limit FROM usage_credits WHERE organization_id = $1 AND month_year = $2`,
         [org.id, monthYear],
       );
+      // D1: belum ada baris usage bulan ini → limit tampil = limit plan (bukan 0
+      // yang menyesatkan). used = 0 karena belum ada settle.
+      const planLimit = planRows[0]?.max_ai_credits_monthly ?? 0;
       return {
         plan: planRows[0] ?? { tier: org.planTier, name: org.planTier, price_monthly: "0", max_ai_credits_monthly: 0 },
         subscription: subRows[0] ?? null,
-        usage: usageRows[0] ?? { credits_used: 0, credits_limit: 0 },
+        usage: usageRows[0] ?? { credits_used: 0, credits_limit: planLimit },
       };
     }, req),
   );
