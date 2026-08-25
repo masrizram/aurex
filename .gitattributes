@@ -1,0 +1,4 @@
+# Skrip shell harus LF agar sah di WSL/bash/Linux/Docker,
+# apa pun core.autocrlf pada mesin kontributor.
+*.sh text eol=lf
+*.bash text eol=lf

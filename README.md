@@ -41,8 +41,10 @@ Kebutuhan: Node 20+, PostgreSQL 16 (lokal atau Docker), npm.
 
 ```bash
 git clone <repo-url> && cd econos
-npm install
 cp .env.example .env        # isi DATABASE_URL, DATABASE_APP_URL, AEE_DEV_DB_PASSWORD
+npm install                 # root workspaces (packages/*) — runner test & tooling backend
+npm install --prefix apps/dashboard   # SPA (lockfile sendiri)
+npm install --prefix apps/landing     # landing (lockfile sendiri)
 npm run migrate             # terapkan migrations/ (owner)
 npx tsx scripts/serve.ts    # dev: API + worker + dashboard di :3000
 ```

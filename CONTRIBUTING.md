@@ -6,7 +6,9 @@ repo ini agar perubahan tetap aman terhadap perilaku produksi yang terverifikasi
 ## Setup cepat
 
 ```bash
-npm install
+npm install                          # root workspaces (packages/*)
+npm install --prefix apps/dashboard  # SPA
+npm install --prefix apps/landing    # landing
 cp .env.example .env      # isi DATABASE_URL, DATABASE_APP_URL, AEE_DEV_DB_PASSWORD
 npm run migrate           # butuh Postgres 16 lokal/Docker
 npx tsx scripts/serve.ts  # dev server :3000
