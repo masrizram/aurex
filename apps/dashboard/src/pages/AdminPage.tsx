@@ -1,88 +1,208 @@
-import { useState, useEffect, useCallback } from "react";
-import { adminOverview, adminUsers, adminOrgs } from "../api";
+import { Link } from "react-router-dom";
+import { ArrowLeft, LogOut } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ThemeSwitch } from "@/components/theme-switch";
+import { LoadingState, ErrorState, fmtNum } from '@/components/aurex-primitives';
+import { adminOverview, adminUsers, adminOrgs, adminObjectives } from "@/api";
+import { useAsync } from "@/hooks/use-async";
 
-// /admin — internal operator surface. Di SINILAH info model/teknis berada
-// (dipisahkan dari /app customer surface sesuai architecture freeze).
+
+// ═════════════════════════════════════════════════════════════════
+// P19 — Internal Admin (§33): technical surface. Same design system.
+// Data teknis (model runs, providers, latency) diizinkan di sini.
+// Guard: App.tsx hanya merender bila session.isAdmin.
+// ═════════════════════════════════════════════════════════════════
 
 export function AdminPage({ onLogout }: { onLogout: () => void }) {
-  const [overview, setOverview] = useState<{ users: number; orgs: number; objectives: { count: number; state: string }[] } | null>(null);
-  const [users, setUsers] = useState<{ id: string; email: string; role: string; name: string | null; status: string; is_admin: boolean }[]>([]);
-  const [orgs, setOrgs] = useState<{ id: string; name: string; slug: string; plan_tier: string; member_count: number }[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: overview, error: oErr, loading: oLoad, reload: oReload } = useAsync(adminOverview, []);
+  const { data: users } = useAsync(adminUsers, []);
+  const { data: orgs } = useAsync(adminOrgs, []);
+  const { data: objectives } = useAsync(adminObjectives, []);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [ov, u, o] = await Promise.all([adminOverview(), adminUsers(), adminOrgs()]);
-      setOverview(ov); setUsers(u.users); setOrgs(o.orgs);
-    } catch (e) { console.error("admin error:", e); }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
+  const stateCounts = overview?.objectives ?? [];
 
   return (
-    <div style={{ minHeight: "100vh", background: "#000", padding: "48px 24px" }}>
-      <div style={{ maxWidth: 900, margin: "0 auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 40 }}>
-          <h1 style={{ color: "#fff", fontSize: 22, fontWeight: 300 }}>AUREX Admin</h1>
-          <div style={{ display: "flex", gap: 12 }}>
-            <a href="/app" style={{ color: "#2251ff", fontSize: 13, textDecoration: "none" }}>← Control Center</a>
-            <button onClick={onLogout} style={{ background: "none", border: "none", color: "#8a8a8a", fontSize: 13, cursor: "pointer" }}>Keluar</button>
-          </div>
+    <div className='min-h-svh bg-background'>
+      <header className='sticky top-0 z-50 flex h-16 items-center gap-3 border-b bg-background px-4'>
+        <Button asChild variant='ghost' size='sm'>
+          <Link to='/app'><ArrowLeft /> Kembali ke app</Link>
+        </Button>
+        <h1 className='text-sm font-semibold'>AUREX Admin</h1>
+        <Badge variant='outline' className='border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400'>
+          Internal
+        </Badge>
+        <div className='ml-auto flex items-center gap-2'>
+          <ThemeSwitch />
+          <Button variant='ghost' size='sm' onClick={onLogout}>
+            <LogOut /> Sign out
+          </Button>
         </div>
-        {loading ? <p style={{ color: "#8a8a8a" }}>Memuat…</p> : overview ? (
-          <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 40 }}>
-              {[{ l: "Users", v: overview.users }, { l: "Organizations", v: overview.orgs }, { l: "Objectives", v: overview.objectives.reduce((s, o) => s + o.count, 0) }].map((c) => (
-                <div key={c.l} style={{ background: "#1a1a1a", borderRadius: 16, padding: 24 }}>
-                  <div style={{ color: "#8a8a8a", fontSize: 13, marginBottom: 8 }}>{c.l}</div>
-                  <div style={{ color: "#fff", fontSize: 32, fontWeight: 300 }}>{c.v}</div>
-                </div>
-              ))}
-            </div>
-            <AdminSection title="Objectives by State (engine internal)">
-              {overview.objectives.map((o) => (
-                <div key={o.state} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #1a1a1a" }}>
-                  <span style={{ color: "#fff", fontSize: 14 }}>{o.state}</span>
-                  <span style={{ color: "#2251ff", fontSize: 14 }}>{o.count}</span>
-                </div>
-              ))}
-            </AdminSection>
-            <AdminSection title="Users">
-              {users.map((u) => (
-                <div key={u.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #1a1a1a" }}>
-                  <div>
-                    <div style={{ color: "#fff", fontSize: 14 }}>{u.email}</div>
-                    <div style={{ color: "#8a8a8a", fontSize: 12 }}>{u.name || "—"} · {u.role}{u.is_admin ? " · ADMIN" : ""}</div>
+      </header>
+      <main className='mx-auto w-full max-w-7xl space-y-6 px-4 py-6'>
+        {/* KPI */}
+        {oLoad ? (
+          <LoadingState rows={2} />
+        ) : oErr ? (
+          <ErrorState message={oErr} onRetry={oReload} />
+        ) : (
+          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-4'>
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardDescription>Total Users</CardDescription>
+                <CardTitle className='text-2xl tabular-nums'>{fmtNum(overview?.users)}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardDescription>Organizations</CardDescription>
+                <CardTitle className='text-2xl tabular-nums'>{fmtNum(overview?.orgs)}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardDescription>Total Objectives</CardDescription>
+                <CardTitle className='text-2xl tabular-nums'>{fmtNum(stateCounts.reduce((a, s) => a + s.count, 0))}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card>
+              <CardHeader className='pb-2'>
+                <CardDescription>Active States</CardDescription>
+                <CardTitle className='text-2xl tabular-nums'>{fmtNum(stateCounts.length)}</CardTitle>
+              </CardHeader>
+            </Card>
+            <Card className='sm:col-span-2 lg:col-span-4'>
+              <CardHeader>
+                <CardTitle className='text-base'>Objectives by State</CardTitle>
+                <CardDescription>Raw FSM states — admin only.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {stateCounts.length === 0 ? (
+                  <p className='text-sm text-muted-foreground'>Tidak ada data.</p>
+                ) : (
+                  <div className='flex flex-wrap gap-2'>
+                    {stateCounts.map((s) => (
+                      <Badge key={s.state} variant='outline' className='font-mono'>
+                        {s.state}: {s.count}
+                      </Badge>
+                    ))}
                   </div>
-                  <span style={{ color: u.status === "ACTIVE" ? "#00a9f4" : "#ff5252", fontSize: 13 }}>{u.status}</span>
-                </div>
-              ))}
-            </AdminSection>
-            <AdminSection title="Organizations">
-              {orgs.map((o) => (
-                <div key={o.id} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #1a1a1a" }}>
-                  <div>
-                    <div style={{ color: "#fff", fontSize: 14 }}>{o.name}</div>
-                    <div style={{ color: "#8a8a8a", fontSize: 12 }}>{o.slug} · {o.plan_tier}</div>
-                  </div>
-                  <span style={{ color: "#8a8a8a", fontSize: 13 }}>{o.member_count} members</span>
-                </div>
-              ))}
-            </AdminSection>
-          </>
-        ) : <p style={{ color: "#ff5252" }}>Gagal memuat data admin</p>}
-      </div>
-    </div>
-  );
-}
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
 
-function AdminSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 40 }}>
-      <h2 style={{ color: "#8a8a8a", fontSize: 13, letterSpacing: 1.5, marginBottom: 16, fontWeight: 400 }}>{title}</h2>
-      <div>{children}</div>
+        {/* Users table */}
+        <Card>
+          <CardHeader>
+            <CardTitle className='text-base'>Users</CardTitle>
+            <CardDescription>{users?.users.length ?? 0} terdaftar.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {!users || users.users.length === 0 ? (
+              <p className='text-sm text-muted-foreground'>Tidak ada user.</p>
+            ) : (
+              <div className='overflow-x-auto rounded-md border'>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Email</TableHead>
+                      <TableHead>Nama</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Admin</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {users.users.slice(0, 50).map((u) => (
+                      <TableRow key={u.id}>
+                        <TableCell className='font-medium'>{u.email}</TableCell>
+                        <TableCell>{u.name ?? '—'}</TableCell>
+                        <TableCell><Badge variant='outline'>{u.role}</Badge></TableCell>
+                        <TableCell>{u.status}</TableCell>
+                        <TableCell>{u.is_admin ? <Badge variant='destructive'>admin</Badge> : '—'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Orgs table */}
+        <Card>
+          <CardHeader>
+            <CardTitle className='text-base'>Organizations</CardTitle>
+            <CardDescription>{orgs?.orgs.length ?? 0} organisasi.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {!orgs || orgs.orgs.length === 0 ? (
+              <p className='text-sm text-muted-foreground'>Tidak ada org.</p>
+            ) : (
+              <div className='overflow-x-auto rounded-md border'>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Nama</TableHead>
+                      <TableHead>Slug</TableHead>
+                      <TableHead>Plan</TableHead>
+                      <TableHead>Members</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {orgs.orgs.slice(0, 50).map((o) => (
+                      <TableRow key={o.id}>
+                        <TableCell className='font-medium'>{o.name}</TableCell>
+                        <TableCell className='font-mono text-xs'>{o.slug}</TableCell>
+                        <TableCell><Badge variant='outline'>{o.plan_tier}</Badge></TableCell>
+                        <TableCell className='tabular-nums'>{o.member_count}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Objectives table */}
+        <Card>
+          <CardHeader>
+            <CardTitle className='text-base'>Objectives</CardTitle>
+            <CardDescription>{objectives?.objectives.length ?? 0} objective (raw state).</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {!objectives || objectives.objectives.length === 0 ? (
+              <p className='text-sm text-muted-foreground'>Tidak ada objective.</p>
+            ) : (
+              <div className='overflow-x-auto rounded-md border'>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Title</TableHead>
+                      <TableHead>Business</TableHead>
+                      <TableHead>State (raw)</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {objectives.objectives.slice(0, 50).map((o) => (
+                      <TableRow key={o.id}>
+                        <TableCell className='font-medium'>{o.title}</TableCell>
+                        <TableCell>{o.business_name ?? '—'}</TableCell>
+                        <TableCell><Badge variant='outline' className='font-mono'>{o.state}</Badge></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </main>
     </div>
   );
 }

@@ -1,5 +1,6 @@
-// API + types for the AEE dashboard — McKinsey design system.
-// All functions accept userId for the x-user-id header.
+// AUREX API client — cookie-session based (production contract).
+// x-user-id header hanya valid di dev-mode backend; UI ini cookie-first.
+// Types retained from the AEE dashboard; mapping helpers preserved.
 
 export type AgentMode = {
   mode: "REAL" | "MOCK";
@@ -11,6 +12,7 @@ export type BusinessVenture = {
   id: string; name: string; industry: string; market: string;
   target_customer: string; problem: string; solution: string;
   business_model: string; price?: number; origin: string;
+  objective_count?: number; created_at?: string;
 };
 
 export type ObjectiveListItem = {
@@ -87,22 +89,21 @@ export function parseApiError(e: unknown): string {
     const m = j?.error?.message ?? j?.message ?? j?.error;
     if (typeof m === "string" && m.length > 0) return m;
   } catch { /* not JSON */ }
-  if (/ECONNREFUSED|fetch failed/i.test(msg)) return "Server tidak terhubung — periksa koneksi database";
-  if (/500/.test(msg)) return "Server error — periksa koneksi database";
+  if (/ECONNREFUSED|fetch failed|Failed to fetch/i.test(msg)) return "Tidak dapat terhubung ke server AUREX. Periksa koneksi Anda.";
+  if (/500/.test(msg)) return "AUREX tidak dapat menyelesaikan permintaan ini. Data Anda aman.";
   if (/503/.test(msg)) return "Service unavailable";
-  if (/429/.test(msg)) return "Rate limited — coba lagi sebentar";
-  if (/404/.test(msg)) return "Not found";
+  if (/429/.test(msg)) return "Terlalu banyak permintaan — coba lagi sebentar.";
+  if (/404/.test(msg)) return "Tidak ditemukan";
   if (/401|403/.test(msg)) return "Akses ditolak";
   return msg;
 }
 
-// ── Core fetch wrapper ──
-async function api<T>(method: string, path: string, userId: string, body?: unknown, hdr?: Record<string, string>): Promise<T> {
+// ── Core fetch wrapper (cookie session; same-origin) ──
+async function api<T>(method: string, path: string, body?: unknown, hdr?: Record<string, string>): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: {
       "content-type": "application/json",
-      "x-user-id": userId,
       ...(hdr || {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -123,12 +124,16 @@ function idemKey(prefix: string): string {
 }
 
 // ── API functions ──
-export async function getMode(userId: string): Promise<AgentMode> {
-  return api<AgentMode>("GET", "/agent-mode", userId);
+export async function getMode(): Promise<AgentMode> {
+  return api<AgentMode>("GET", "/agent-mode");
 }
 
-export async function listObjectives(userId: string): Promise<ObjectiveListItem[]> {
-  const res = await api<{ objectives: any[] }>("GET", "/objectives", userId);
+export async function listVentures(): Promise<{ ventures: BusinessVenture[] }> {
+  return api<{ ventures: BusinessVenture[] }>("GET", "/ventures");
+}
+
+export async function listObjectives(): Promise<ObjectiveListItem[]> {
+  const res = await api<{ objectives: any[] }>("GET", "/objectives");
   return (res.objectives || []).map(mapListItem);
 }
 
@@ -145,8 +150,8 @@ function mapListItem(raw: any): ObjectiveListItem {
   };
 }
 
-export async function getObjectiveDetail(id: string, userId: string): Promise<ObjectiveDetail> {
-  const raw = await api<any>("GET", `/objectives/${id}`, userId);
+export async function getObjectiveDetail(id: string): Promise<ObjectiveDetail> {
+  const raw = await api<any>("GET", `/objectives/${id}`);
   return mapDetail(raw);
 }
 
@@ -182,17 +187,21 @@ function mapDetail(raw: any): ObjectiveDetail {
   };
 }
 
-export async function createObjective(body: Record<string, unknown>, userId: string): Promise<CreateResult> {
-  return api<CreateResult>("POST", "/objectives", userId, body, { "idempotency-key": idemKey("obj") });
+export async function createObjective(body: Record<string, unknown>): Promise<CreateResult> {
+  return api<CreateResult>("POST", "/objectives", body, { "idempotency-key": idemKey("obj") });
 }
 
-export async function startObjective(id: string, userId: string): Promise<{ cycle_id: string }> {
-  return api<{ cycle_id: string }>("POST", `/objectives/${id}/start`, userId, {}, { "idempotency-key": idemKey("start") });
+export async function startObjective(id: string): Promise<{ cycle_id: string }> {
+  return api<{ cycle_id: string }>("POST", `/objectives/${id}/start`, {}, { "idempotency-key": idemKey("start") });
 }
 
-export async function listApprovals(objectiveId: string, userId: string): Promise<Approval[]> {
+export async function stopObjective(id: string, reason: string): Promise<unknown> {
+  return api("POST", `/objectives/${id}/stop`, { reason }, { "idempotency-key": idemKey("stop") });
+}
+
+export async function listApprovals(objectiveId: string): Promise<Approval[]> {
   try {
-    const res = await api<{ approvals: any[] }>("GET", `/approvals?objective_id=${objectiveId}`, userId);
+    const res = await api<{ approvals: any[] }>("GET", `/approvals?objective_id=${objectiveId}`);
     return (res.approvals || []).map(a => ({
       id: a.id,
       decision_type: a.category || a.kind || a.decision_type || "UNKNOWN",
@@ -204,17 +213,17 @@ export async function listApprovals(objectiveId: string, userId: string): Promis
   } catch { return []; }
 }
 
-export async function approveDecision(approvalId: string, userId: string): Promise<void> {
-  await api("POST", `/approvals/${approvalId}/approve`, userId, { version: 0 }, { "idempotency-key": idemKey("ap") });
+export async function approveDecision(approvalId: string): Promise<void> {
+  await api("POST", `/approvals/${approvalId}/approve`, { version: 0 }, { "idempotency-key": idemKey("ap") });
 }
 
-export async function rejectDecision(approvalId: string, userId: string): Promise<void> {
-  await api("POST", `/approvals/${approvalId}/reject`, userId, { reason: "dashboard" }, { "idempotency-key": idemKey("rj") });
+export async function rejectDecision(approvalId: string, reason = "dashboard"): Promise<void> {
+  await api("POST", `/approvals/${approvalId}/reject`, { reason }, { "idempotency-key": idemKey("rj") });
 }
 
-export async function listEvents(objectiveId: string, userId: string): Promise<AeeEvent[]> {
+export async function listEvents(objectiveId: string): Promise<AeeEvent[]> {
   try {
-    const res = await api<{ events: any[] }>("GET", `/events?objective_id=${objectiveId}`, userId);
+    const res = await api<{ events: any[] }>("GET", `/events?objective_id=${objectiveId}`);
     return (res.events || []).map(e => ({
       id: e.id,
       event_type: e.event_type || e.type || "UNKNOWN",
@@ -226,9 +235,9 @@ export async function listEvents(objectiveId: string, userId: string): Promise<A
   } catch { return []; }
 }
 
-export async function listOpportunities(objectiveId: string, userId: string): Promise<OppSummary[]> {
+export async function listOpportunities(objectiveId: string): Promise<OppSummary[]> {
   try {
-    const res = await api<{ opportunities: any[] }>(`GET`, `/objectives/${objectiveId}/opportunities`, userId);
+    const res = await api<{ opportunities: any[] }>(`GET`, `/objectives/${objectiveId}/opportunities`);
     return (res.opportunities || []).map(o => ({
       id: o.id,
       name: o.name || "—",
@@ -339,48 +348,46 @@ export async function onboardingStep5(data: { title: string; target_profit: stri
   return JSON.parse(await res.text());
 }
 
-// ── Admin API ──────────────────────────────────────────────────────────────────
-
 // ── Auth lifecycle §6 ──
 export async function verifyEmail(token: string): Promise<{ ok: boolean }> {
-  return api("POST", "/auth/verify-email", "", { token });
+  return api("POST", "/auth/verify-email", { token });
 }
 export async function forgotPassword(email: string): Promise<{ ok: boolean }> {
-  return api("POST", "/auth/forgot-password", "", { email });
+  return api("POST", "/auth/forgot-password", { email });
 }
 export async function resetPassword(token: string, password: string): Promise<{ ok: boolean }> {
-  return api("POST", "/auth/reset-password", "", { token, password });
+  return api("POST", "/auth/reset-password", { token, password });
 }
 
 // ── Opportunity actions §19 ──
-export async function selectOpportunity(objectiveId: string, oppId: string, reason?: string, userId = ""): Promise<{ queued: boolean }> {
-  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/select`, userId, { reason });
+export async function selectOpportunity(objectiveId: string, oppId: string, reason?: string): Promise<{ queued: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/select`, { reason });
 }
-export async function letAurexDecide(objectiveId: string, userId = ""): Promise<{ queued: boolean }> {
-  return api("POST", `/objectives/${objectiveId}/opportunities/let-aurex-decide`, userId, {});
+export async function letAurexDecide(objectiveId: string): Promise<{ queued: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/let-aurex-decide`, {});
 }
-export async function rejectOpportunity(objectiveId: string, oppId: string, reason?: string, userId = ""): Promise<{ rejected: boolean }> {
-  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/reject`, userId, { reason });
+export async function rejectOpportunity(objectiveId: string, oppId: string, reason?: string): Promise<{ rejected: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/reject`, { reason });
 }
-export async function saveOpportunity(objectiveId: string, oppId: string, note?: string, userId = ""): Promise<{ saved: boolean }> {
-  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/save`, userId, { note });
+export async function saveOpportunity(objectiveId: string, oppId: string, note?: string): Promise<{ saved: boolean }> {
+  return api("POST", `/objectives/${objectiveId}/opportunities/${oppId}/save`, { note });
 }
 
 // ── Product layer §20-27 ──
-export async function listExperiments(objectiveId: string, userId = ""): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/experiments`, userId);
+export async function listExperiments(objectiveId: string): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/experiments`);
 }
-export async function listMissions(objectiveId: string, userId = ""): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/missions`, userId);
+export async function listMissions(objectiveId: string): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/missions`);
 }
-export async function listResults(objectiveId: string, userId = ""): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/results`, userId);
+export async function listResults(objectiveId: string): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/results`);
 }
-export async function getEconomics(objectiveId: string, userId = ""): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/economics`, userId);
+export async function getEconomics(objectiveId: string): Promise<any> {
+  return api("GET", `/objectives/${objectiveId}/economics`);
 }
-export async function listDecisions(objectiveId: string, userId = ""): Promise<{ decisions: any[] }> {
-  return api("GET", `/decisions?objective_id=${objectiveId}`, userId);
+export async function listDecisions(objectiveId: string): Promise<{ decisions: any[] }> {
+  return api("GET", `/decisions?objective_id=${objectiveId}`);
 }
 
 export async function adminOverview(): Promise<{ users: number; orgs: number; objectives: { count: number; state: string }[] }> {
@@ -397,6 +404,12 @@ export async function adminUsers(): Promise<{ users: { id: string; email: string
 
 export async function adminOrgs(): Promise<{ orgs: { id: string; name: string; slug: string; plan_tier: string; member_count: number }[] }> {
   const res = await fetch(`/admin/orgs`, { headers: { "content-type": "application/json" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return JSON.parse(await res.text());
+}
+
+export async function adminObjectives(): Promise<{ objectives: { id: string; title: string; state: string; business_name: string | null }[] }> {
+  const res = await fetch(`/admin/objectives`, { headers: { "content-type": "application/json" } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return JSON.parse(await res.text());
 }

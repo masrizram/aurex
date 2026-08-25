@@ -1,155 +1,376 @@
-import { useEffect, useState, useCallback } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { listObjectives, createObjective, type ObjectiveListItem, parseApiError } from "../api";
-import { useSession, resolveUserId } from "../lib/session";
+import * as React from "react";
+import { Link } from "react-router-dom";
+import {
+  type ColumnDef,
+  type ColumnFiltersState,
+  type SortingState,
+  type VisibilityState,
+  flexRender,
+  getCoreRowModel,
+  getFacetedRowModel,
+  getFacetedUniqueValues,
+  getFilteredRowModel,
+  getPaginationRowModel,
+  getSortedRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
+import { Plus } from "lucide-react";
+import { toast } from "sonner";
+import { Header } from "@/components/layout/header";
+import { Main } from "@/components/layout/main";
+import { ProfileDropdown } from "@/components/profile-dropdown";
+import { Search } from "@/components/search";
+import { ThemeSwitch } from "@/components/theme-switch";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { DataTablePagination } from "@/components/data-table/pagination";
+import { DataTableToolbar } from "@/components/data-table/toolbar";
+import { MoreHorizontal } from "lucide-react";
+import { EmptyState, ErrorState, LoadingState, StatusBadge, phaseLabel } from "@/components/aurex-primitives";
+import { listObjectives, createObjective, parseApiError, type ObjectiveListItem } from "@/api";
+import { useSession } from "@/lib/session";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { useAsync } from "@/hooks/use-async";
 
-// Objectives list — customer-language (bukan FSM stage pill mentah).
-// Stage internal dipetakan ke fase yang dimengerti customer.
-// Catatan freeze: raw state TIDAK ditulis sebagai literal utuh di bundle —
-// tabel dibangun dari pasangan token agar string internal tidak bocor ke HTML.
-
-const PHASE_ENTRIES: [string, string][] = [
-  ["OBJECTIVE", "Menyiapkan"],
-  ["RESEARCH", "Riset pasar"],
-  ["RANK", "Menyusun peringkat"],
-  ["SELECT", "Memilih peluang"],
-  ["EXPERIMENT", "Eksperimen dirancang"],
-  ["RESULT", "Hasil siap"],
-  ["MISSION", "Misi dibuat"],
-  ["APPROVAL", "Menunggu approval"],
-  ["EXECUT", "Mengeksekusi"],
-  ["ANALYZ", "Menganalisis hasil"],
-  ["DECISION", "Keputusan siap"],
-  ["ACHIEVED", "Tercapai"],
-  ["STOPPED", "Dihentikan"],
-  ["BLOCKED", "Terblokir"],
-];
-
-function phaseLabel(stage: string): string {
-  if (!stage || stage === "UNKNOWN") return "Aktif";
-  for (const [token, label] of PHASE_ENTRIES) {
-    if (stage.includes(token)) return label;
-  }
-  return "Aktif";
-}
+// ═════════════════════════════════════════════════════════════════
+// P9 — Objectives (§15): shadcn-admin data-table architecture.
+// Search + filter status + sorting + pagination + row actions.
+// ═════════════════════════════════════════════════════════════════
 
 export function ObjectivesPage() {
   const session = useSession();
-  const userId = resolveUserId(session);
-  const navigate = useNavigate();
-  const [objectives, setObjectives] = useState<ObjectiveListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [showCreate, setShowCreate] = useState(false);
+  const { data, error, loading, reload } = useAsync(listObjectives);
+  const objectives = data ?? [];
 
-  const refresh = useCallback(async () => {
-    try { setObjectives(await listObjectives(userId)); setError(null); }
-    catch (e) { setError(parseApiError(e)); }
-    finally { setLoading(false); }
-  }, [userId]);
+  const [sorting, setSorting] = React.useState<SortingState>([]);
+  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([]);
+  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({});
+  const [rowSelection, setRowSelection] = React.useState({});
+  const [createOpen, setCreateOpen] = React.useState(false);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  const columns = React.useMemo<ColumnDef<ObjectiveListItem>[]>(
+    () => [
+      {
+        id: "select",
+        header: ({ table }) => (
+          <Checkbox
+            checked={
+              table.getIsAllPageRowsSelected() ||
+              (table.getIsSomePageRowsSelected() && "indeterminate")
+            }
+            onCheckedChange={(value) => table.toggleAllPageRowsSelected(!!value)}
+            aria-label='Select all'
+          />
+        ),
+        cell: ({ row }) => (
+          <Checkbox
+            checked={row.getIsSelected()}
+            onCheckedChange={(value) => row.toggleSelected(!!value)}
+            aria-label='Select row'
+          />
+        ),
+        enableSorting: false,
+        enableHiding: false,
+      },
+      {
+        accessorKey: "title",
+        header: "Objective",
+        cell: ({ row }) => (
+          <Link
+            to={`/app/objectives/${row.original.id}`}
+            className='font-medium underline-offset-4 hover:underline'
+          >
+            {row.original.title}
+          </Link>
+        ),
+      },
+      {
+        accessorKey: "business_name",
+        header: "Business",
+        cell: ({ row }) => row.original.business_name ?? "—",
+      },
+      {
+        accessorKey: "industry",
+        header: "Baseline",
+        cell: ({ row }) => row.original.industry ?? "—",
+      },
+      {
+        accessorKey: "progress",
+        header: "Progress",
+        cell: ({ row }) => <span className='tabular-nums'>{row.original.progress}%</span>,
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => <StatusBadge stage={row.original.status} />,
+        filterFn: (row, id, value) => value.includes(row.getValue(id)),
+      },
+      {
+        accessorKey: "recommendation",
+        header: () => null,
+        cell: () => null,
+        enableHiding: true,
+      },
+      {
+        id: "actions",
+        header: () => null,
+        cell: ({ row }) => (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label='Open menu'
+                variant='ghost'
+                className='data-[state=open]:bg-muted flex size-8'
+              >
+                <MoreHorizontal className='size-4' />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align='end' className='w-40'>
+              <DropdownMenuItem asChild>
+                <Link to={`/app/objectives/${row.original.id}`}>Buka detail</Link>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant='destructive'
+                onClick={() => {
+                  toast.info("Gunakan detail objective untuk menghentikan siklus.");
+                }}
+              >
+                Hentikan
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
+      },
+    ],
+    []
+  );
+
+  const table = useReactTable({
+    data: objectives,
+    columns,
+    state: { sorting, columnFilters, columnVisibility, rowSelection },
+    getRowId: (row) => row.id,
+    onSortingChange: setSorting,
+    onColumnFiltersChange: setColumnFilters,
+    onColumnVisibilityChange: setColumnVisibility,
+    onRowSelectionChange: setRowSelection,
+    getCoreRowModel: getCoreRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFacetedRowModel: getFacetedRowModel(),
+    getFacetedUniqueValues: getFacetedUniqueValues(),
+  });
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h1 className="page-title">Objectives</h1>
-        <button className="btn btn--primary" onClick={() => setShowCreate(true)}>+ Objective Baru</button>
-      </div>
-      <p className="page-subtitle">{objectives.length} objective — apa yang ingin Anda capai.</p>
-      {error && <div className="error-banner"><span className="error-banner-text">{error}</span></div>}
-
-      {showCreate && <CreateObjectiveInline
-        onCancel={() => setShowCreate(false)}
-        onCreated={(id) => { setShowCreate(false); navigate(`/app/objectives/${id}`); }}
-        userId={userId} />}
-
-      {loading ? <p style={{ color: "#8a8a8a" }}>Memuat…</p> : objectives.length === 0 && !showCreate ? (
-        <div className="empty-state">
-          <p className="empty-state-title">Apa yang ingin Anda capai?</p>
-          <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
-            <button className="btn btn--primary" onClick={() => setShowCreate(true)}>Increase Profit</button>
-            <button className="btn" onClick={() => setShowCreate(true)}>Reduce Cost</button>
-            <button className="btn" onClick={() => setShowCreate(true)}>Find Growth</button>
-            <button className="btn" onClick={() => setShowCreate(true)}>Explore New Venture</button>
+    <>
+      <Header>
+        <div className='flex flex-row gap-2'>
+          <Search />
+          <div className='ml-auto flex items-center gap-2 space-x-1'>
+            <ThemeSwitch />
+            <ProfileDropdown session={session} />
           </div>
         </div>
-      ) : (
-        objectives.map((o) => (
-          <Link key={o.id} to={`/app/objectives/${o.id}`} className="exec-block"
-            style={{ display: "block", marginBottom: 16, textDecoration: "none", color: "inherit" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontSize: 17, fontWeight: 400 }}>{o.title}</div>
-                <div style={{ color: "#8a8a8a", fontSize: 13, marginTop: 4 }}>{o.business_name || "—"}</div>
+      </Header>
+      <Main>
+        <div className='mb-6 flex w-full flex-wrap items-start justify-between gap-4'>
+          <div className='flex flex-col gap-1'>
+            <h1 className='text-2xl font-semibold tracking-tight'>Objectives</h1>
+            <p className='text-sm text-muted-foreground'>
+              Semua objective ekonomi organisasi Anda.
+            </p>
+          </div>
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus /> Create Objective
+          </Button>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Daftar Objective</CardTitle>
+            <CardDescription>
+              {objectives.length} objective · {table.getFilteredRowModel().rows.length} tampil
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {loading ? (
+              <LoadingState rows={4} />
+            ) : error ? (
+              <ErrorState message={error} onRetry={reload} />
+            ) : objectives.length === 0 ? (
+              <EmptyState
+                title='Belum ada objective'
+                description='Buat objective ekonomi pertama Anda untuk mulai menemukan peluang.'
+                action={<Button onClick={() => setCreateOpen(true)}>Create Objective</Button>}
+              />
+            ) : (
+              <div className='space-y-4'>
+                <DataTableToolbar
+                  table={table}
+                  searchPlaceholder='Cari objective…'
+                  searchKey='title'
+                  filters={[
+                    {
+                      columnId: "status",
+                      title: "Status",
+                      options: uniqueStatuses(objectives).map((s) => ({
+                        label: phaseLabel(s),
+                        value: s,
+                      })),
+                    },
+                  ]}
+                />
+                <div className='overflow-hidden rounded-md border'>
+                  <Table>
+                    <TableHeader>
+                      {table.getHeaderGroups().map((headerGroup) => (
+                        <TableRow key={headerGroup.id} className='hover:bg-transparent'>
+                          {headerGroup.headers.map((header) => (
+                            <TableHead key={header.id}>
+                              {header.isPlaceholder
+                                ? null
+                                : flexRender(header.column.columnDef.header, header.getContext())}
+                            </TableHead>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </TableHeader>
+                    <TableBody>
+                      {table.getRowModel().rows?.length ? (
+                        table.getRowModel().rows.map((row) => (
+                          <TableRow
+                            key={row.id}
+                            data-state={row.getIsSelected() && "selected"}
+                          >
+                            {row.getVisibleCells().map((cell) => (
+                              <TableCell key={cell.id}>
+                                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={columns.length} className='h-24 text-center'>
+                            Tidak ada hasil.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+                <DataTablePagination table={table} />
               </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ color: "#2251ff", fontSize: 13 }}>{phaseLabel(o.stage)}</div>
-                <div style={{ color: "#8a8a8a", fontSize: 13, marginTop: 4 }}>{Math.round(o.progress || 0)}%</div>
-              </div>
-            </div>
-          </Link>
-        ))
-      )}
-    </div>
+            )}
+          </CardContent>
+        </Card>
+      </Main>
+      <CreateObjectiveDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={reload} />
+    </>
   );
 }
 
-function CreateObjectiveInline({ userId, onCreated, onCancel }: { userId: string; onCreated: (id: string) => void; onCancel: () => void }) {
-  const [title, setTitle] = useState("");
-  const [intent, setIntent] = useState("increase_profit");
-  const [targetProfit, setTargetProfit] = useState("2000000");
-  const [capital, setCapital] = useState("1000000");
-  const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+function uniqueStatuses(objs: ObjectiveListItem[]): string[] {
+  return Array.from(new Set(objs.map((o) => o.status).filter(Boolean)));
+}
 
-  const submit = async () => {
-    if (!title.trim()) { setErr("Judul objective wajib diisi"); return; }
-    setSubmitting(true); setErr(null);
+function CreateObjectiveDialog({
+  open, onOpenChange, onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onCreated: () => void;
+}) {
+  const [title, setTitle] = React.useState("");
+  const [industry, setIndustry] = React.useState("");
+  const [businessName, setBusinessName] = React.useState("");
+  const [target, setTarget] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true); setErr(null);
     try {
-      const res = await createObjective({
-        title, business_mode: "DISCOVERY", goal_type: intent,
-        target_profit: targetProfit, capital_approved: capital,
-        horizon_months: 3, market: "Indonesia", risk_tolerance: "moderate",
-      }, userId);
-      const id = res.objective?.id ?? res.id;
-      if (id) onCreated(id); else setErr("Tidak ada ID objective dalam response");
-    } catch (e) { setErr(parseApiError(e)); }
-    finally { setSubmitting(false); }
-  };
+      await createObjective({
+        title,
+        industry: industry || undefined,
+        business_mode: businessName ? "KNOWN" : "DISCOVERY",
+        business: businessName ? { name: businessName, industry: industry || "General" } : undefined,
+        economics: target ? { revenue_target: Number(target) } : undefined,
+      });
+      toast.success("Objective dibuat.");
+      onOpenChange(false);
+      setTitle(""); setIndustry(""); setBusinessName(""); setTarget("");
+      onCreated();
+    } catch (e2) {
+      setErr(parseApiError(e2));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
-    <div className="exec-block" style={{ marginBottom: 24 }}>
-      <div style={{ fontSize: 17, fontWeight: 400, marginBottom: 16 }}>Objective Baru</div>
-      <div className="form-group">
-        <label className="form-label">Apa yang ingin Anda lakukan?</label>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {["increase_profit", "reduce_cost", "find_opportunities", "launch_new", "improve_growth"].map((g) => (
-            <button key={g} className="tab" data-active={intent === g} onClick={() => setIntent(g)}
-              style={{ textTransform: "capitalize" }}>{g.replace("_", " ")}</button>
-          ))}
-        </div>
-      </div>
-      <div className="form-group">
-        <label className="form-label" htmlFor="obj-title">Judul objective</label>
-        <input id="obj-title" className="form-input" value={title} onChange={(e) => setTitle(e.target.value)}
-          placeholder="Contoh: Tingkatkan profit bulanan" disabled={submitting} />
-      </div>
-      <div style={{ display: "flex", gap: 16 }}>
-        <div className="form-group" style={{ flex: 1 }}>
-          <label className="form-label">Target profit (Rp)</label>
-          <input className="form-input" value={targetProfit} onChange={(e) => setTargetProfit(e.target.value)} disabled={submitting} />
-        </div>
-        <div className="form-group" style={{ flex: 1 }}>
-          <label className="form-label">Modal disetujui (Rp)</label>
-          <input className="form-input" value={capital} onChange={(e) => setCapital(e.target.value)} disabled={submitting} />
-        </div>
-      </div>
-      {err && <div className="error-banner" role="alert"><span className="error-banner-text">{err}</span></div>}
-      <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-        <button className="btn btn--primary" onClick={submit} disabled={submitting}>{submitting ? "Membuat…" : "Buat Objective"}</button>
-        <button className="btn" onClick={onCancel} disabled={submitting}>Batal</button>
-      </div>
-    </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className='sm:max-w-md'>
+        <DialogHeader>
+          <DialogTitle>Create Objective</DialogTitle>
+          <DialogDescription>
+            Objective = tujuan ekonomi yang AUREX kejar untuk Anda.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className='grid gap-4'>
+          {err && <p className='text-sm text-destructive' role='alert'>{err}</p>}
+          <div className='grid gap-2'>
+            <Label htmlFor='obj-title'>Judul</Label>
+            <Input id='obj-title' value={title} onChange={(e) => setTitle(e.target.value)} required placeholder='Naikkan profit bulanan ke Rp20jt' />
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='obj-industry'>Industri</Label>
+            <Input id='obj-industry' value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder='Retail' />
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='obj-biz'>Bisnis (opsional)</Label>
+            <Input id='obj-biz' value={businessName} onChange={(e) => setBusinessName(e.target.value)} placeholder='ABC Commerce' />
+          </div>
+          <div className='grid gap-2'>
+            <Label htmlFor='obj-target'>Target revenue (Rp)</Label>
+            <Input id='obj-target' inputMode='numeric' value={target} onChange={(e) => setTarget(e.target.value)} placeholder='20000000' />
+          </div>
+          <DialogFooter>
+            <Button type='button' variant='outline' onClick={() => onOpenChange(false)}>Batal</Button>
+            <Button type='submit' disabled={saving}>{saving ? "Menyimpan…" : "Buat"}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

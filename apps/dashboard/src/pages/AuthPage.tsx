@@ -1,9 +1,45 @@
 import { useState } from "react";
-import { signup, login, verifyEmail, forgotPassword, resetPassword, parseApiError } from "../api";
+import { Link, useNavigate } from "react-router-dom";
+import { TrendingUp } from "lucide-react";
+import { signup, login, verifyEmail, forgotPassword, resetPassword, parseApiError } from "@/api";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { PasswordInput } from "@/components/password-input";
+
+// ═════════════════════════════════════════════════════════════════
+// AUREX Auth — shadcn-admin auth design language (§28).
+// Screens: Sign In / Sign Up / Verify / Forgot / Reset. No sidebar.
+// ═════════════════════════════════════════════════════════════════
 
 type Mode = "login" | "signup" | "verify" | "forgot" | "reset";
 
+function AuthLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className='container grid h-svh max-w-none items-center justify-center'>
+      <div className='mx-auto flex w-full flex-col justify-center space-y-2 py-8 sm:p-8'>
+        <div className='mb-4 flex items-center justify-center gap-2'>
+          <TrendingUp className='size-5' aria-hidden='true' />
+          <h1 className='text-xl font-medium'>AUREX</h1>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const TITLES: Record<Mode, { title: string; desc: string }> = {
+  login: { title: "Masuk ke AUREX", desc: "Economic Control Center untuk bisnis Anda." },
+  signup: { title: "Buat akun AUREX", desc: "Mulai bangun economic operating system bisnis Anda." },
+  verify: { title: "Verifikasi Email", desc: "Masukkan token verifikasi dari email Anda." },
+  forgot: { title: "Lupa Password", desc: "Kami kirimkan tautan pemulihan bila email terdaftar." },
+  reset: { title: "Ganti Password", desc: "Masukkan token dan password baru Anda." },
+};
+
 export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
+  const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>(mode0());
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,6 +59,15 @@ export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
     if (p.startsWith("/auth/reset-password")) return "reset";
     if (p.startsWith("/auth/signup")) return "signup";
     return "login";
+  }
+
+  function goto(m: Mode) {
+    setMode(m); setError(null); setNotice(null);
+    const paths: Record<Mode, string> = {
+      login: "/auth/login", signup: "/auth/signup", verify: "/auth/verify",
+      forgot: "/auth/forgot-password", reset: "/auth/reset-password",
+    };
+    navigate(paths[m], { replace: true });
   }
 
   async function submit(e: React.FormEvent) {
@@ -46,7 +91,7 @@ export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
         await forgotPassword(email);
         setNotice("Jika email terdaftar, tautan pemulihan telah dikirim.");
       } else if (mode === "reset") {
-        if (newPassword.length < 8) { setError("Password minimal 8 karakter"); return; }
+        if (newPassword.length < 8) { setError("Password minimal 8 karakter"); setLoading(false); return; }
         await resetPassword(token, newPassword);
         setNotice("Password berhasil diganti. Silakan masuk.");
         setMode("login");
@@ -58,74 +103,107 @@ export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
     }
   }
 
-  const title: Record<Mode, string> = {
-    login: "Masuk ke AUREX",
-    signup: "Buat akun AUREX",
-    verify: "Verifikasi Email",
-    forgot: "Lupa Password",
-    reset: "Ganti Password",
-  };
+  const t = TITLES[mode];
 
   return (
-    <div className="auth-page">
-      <div className="auth-card">
-        <div className="brand">AUREX</div>
-        <h2>{title[mode]}</h2>
-        {notice && <div className="notice" role="status">{notice}</div>}
-        {error && <div className="error" role="alert">{error}</div>}
-        {devVerifyToken && (
-          <div className="notice dev-token">
-            Mode pengembangan — tautan verifikasi:{" "}
-            <a href={`/auth/verify?token=${devVerifyToken}`}>klik untuk verifikasi</a>
+    <AuthLayout>
+      <Card className='mx-auto w-full max-w-sm'>
+        <CardHeader>
+          <CardTitle className='text-xl'>{t.title}</CardTitle>
+          <CardDescription>{t.desc}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {notice && (
+            <Alert className='mb-4' role='status'>
+              <AlertDescription>{notice}</AlertDescription>
+            </Alert>
+          )}
+          {error && (
+            <Alert variant='destructive' className='mb-4' role='alert'>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+          {devVerifyToken && (
+            <Alert className='mb-4'>
+              <AlertDescription>
+                Mode pengembangan — tautan verifikasi:{" "}
+                <Link className='underline' to={`/auth/verify?token=${devVerifyToken}`}>
+                  klik untuk verifikasi
+                </Link>
+              </AlertDescription>
+            </Alert>
+          )}
+          <form onSubmit={submit} className='grid gap-4'>
+            {(mode === "login" || mode === "signup" || mode === "forgot") && (
+              <div className='grid gap-2'>
+                <Label htmlFor='email'>Email</Label>
+                <Input
+                  id='email' type='email' value={email}
+                  onChange={(e) => setEmail(e.target.value)} required autoComplete='email'
+                />
+              </div>
+            )}
+            {mode === "signup" && (
+              <>
+                <div className='grid gap-2'>
+                  <Label htmlFor='name'>Nama</Label>
+                  <Input id='name' value={name} onChange={(e) => setName(e.target.value)} autoComplete='name' />
+                </div>
+                <div className='grid gap-2'>
+                  <Label htmlFor='orgName'>Nama Organisasi (opsional)</Label>
+                  <Input id='orgName' value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder='PT Contoh Sukses' />
+                </div>
+              </>
+            )}
+            {(mode === "login" || mode === "signup") && (
+              <div className='grid gap-2'>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='password'>Password</Label>
+                  {mode === "login" && (
+                    <button type='button' className='text-xs text-muted-foreground underline-offset-4 hover:underline' onClick={() => goto("forgot")}>
+                      Lupa password?
+                    </button>
+                  )}
+                </div>
+                <PasswordInput
+                  id='password' value={password}
+                  onChange={(e) => setPassword(e.target.value)} required minLength={8} autoComplete={mode === "login" ? "current-password" : "new-password"}
+                />
+              </div>
+            )}
+            {(mode === "verify" || mode === "reset") && (
+              <div className='grid gap-2'>
+                <Label htmlFor='token'>Token</Label>
+                <Input id='token' value={token} onChange={(e) => setToken(e.target.value)} required placeholder='token dari email' />
+              </div>
+            )}
+            {mode === "reset" && (
+              <div className='grid gap-2'>
+                <Label htmlFor='newPassword'>Password Baru</Label>
+                <PasswordInput
+                  id='newPassword' value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)} required minLength={8} autoComplete='new-password'
+                />
+              </div>
+            )}
+            <Button type='submit' className='w-full' disabled={loading}>
+              {loading ? "Memproses…" : t.title}
+            </Button>
+          </form>
+          <div className='mt-4 text-center text-sm'>
+            {mode === "login" ? (
+              <>
+                Belum punya akun?{" "}
+                <Link to='/auth/signup' className='underline underline-offset-4' onClick={() => goto("signup")}>Buat akun</Link>
+              </>
+            ) : (
+              <button type='button' className='text-muted-foreground underline underline-offset-4 hover:underline' onClick={() => goto("login")}>
+                Kembali ke Masuk
+              </button>
+            )}
           </div>
-        )}
-        <form onSubmit={submit}>
-          {(mode === "login" || mode === "signup" || mode === "forgot") && (
-            <label>Email
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-            </label>
-          )}
-          {mode === "signup" && (
-            <>
-              <label>Nama
-                <input value={name} onChange={(e) => setName(e.target.value)} />
-              </label>
-              <label>Nama Organisasi (opsional)
-                <input value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder="PT Contoh Sukses" />
-              </label>
-            </>
-          )}
-          {(mode === "login" || mode === "signup") && (
-            <label>Password
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
-            </label>
-          )}
-          {(mode === "verify" || mode === "reset") && (
-            <label>Token
-              <input value={token} onChange={(e) => setToken(e.target.value)} required placeholder="token dari email" />
-            </label>
-          )}
-          {mode === "reset" && (
-            <label>Password Baru
-              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required minLength={8} />
-            </label>
-          )}
-          <button type="submit" disabled={loading}>
-            {loading ? "Memproses…" : title[mode]}
-          </button>
-        </form>
-        <div className="auth-links">
-          {mode === "login" && (
-            <>
-              <button onClick={() => { setMode("forgot"); setError(null); setNotice(null); }}>Lupa password?</button>
-              <button onClick={() => { setMode("signup"); setError(null); setNotice(null); }}>Buat akun baru</button>
-            </>
-          )}
-          {mode !== "login" && (
-            <button onClick={() => { setMode("login"); setError(null); setNotice(null); }}>Kembali ke Masuk</button>
-          )}
-        </div>
-      </div>
-    </div>
+        </CardContent>
+      </Card>
+    </AuthLayout>
   );
 }
