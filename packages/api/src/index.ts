@@ -47,34 +47,70 @@ type ErrorCode = (typeof ERROR_CODES)[number];
 
 // ═══ G9: AI Usage Metering (pre-check + settle) ═════════════════════════════
 // Flow: PRE-CHECK → EXECUTE → SETTLE. Balance <= 0 → tolak sebelum model call.
+// D1 fix: metering kini plan-aware (credits_limit dari subscription_plans,
+// bukan hardcode 0) dan pre-check TIDAK bypass saat baris usage belum ada —
+// limit plan tetap berlaku (org tanpa baris usage = used 0).
 
 interface UsageRowG9 { credits_used: number; credits_limit: number; credits_purchased: number }
 
+/** Limit AI credit efektif org bulan ini: plan limit + purchased; null = unlimited. */
+async function aiCreditsLimit(client: PoolClient, orgId: string): Promise<number | null> {
+  const { rows } = await client.query<{ limit: number | null }>(
+    `SELECT sp.max_ai_credits_monthly AS "limit"
+     FROM organizations o JOIN subscription_plans sp ON sp.tier = o.plan_tier AND sp.is_active = true
+     WHERE o.id = $1`, [orgId]);
+  return rows[0]?.limit ?? 100; // plan row hilang → fallback konservatif FREE
+}
+
 /** Cek saldo AI credits org utk bulan berjalan. Throw 429 kalau habis. */
 async function checkAiCreditsAvailable(client: PoolClient, orgId: string, needed = 1): Promise<void> {
+  const limit = await aiCreditsLimit(client, orgId);
+  if (limit === null) return; // ENTERPRISE unlimited
   const monthYear = new Date().toISOString().slice(0, 7);
   const { rows } = await client.query<UsageRowG9>(
     `SELECT credits_used, credits_limit, credits_purchased FROM usage_credits
      WHERE organization_id = $1 AND month_year = $2`,
     [orgId, monthYear]);
   const u = rows[0];
-  if (!u) return; // belum ada baris usage bulan ini → belum dibatasi
-  const effective = (u.credits_limit ?? 0) + (u.credits_purchased ?? 0);
-  if (u.credits_used + needed > effective) {
+  const used = u?.credits_used ?? 0;
+  const purchased = u?.credits_purchased ?? 0;
+  const effective = limit + purchased;
+  if (used + needed > effective) {
     throw new ApiError(429, "RATE_LIMITED",
-      `AI credit limit reached (${u.credits_used}/${effective}) — top-up atau upgrade plan`);
+      `AI credit limit reached (${used}/${effective}) — top-up atau upgrade plan`);
   }
 }
 
-/** Catat pemakaian 1 credit AI (dipanggil setelah agent job sukses). */
+/** Catat pemakaian AI credit bulan berjalan (limit dipersist = limit plan saat itu). */
 async function consumeAiCredit(client: PoolClient, orgId: string): Promise<void> {
+  const limit = await aiCreditsLimit(client, orgId);
+  if (limit === null) return; // unlimited — tetap catat? tidak: tanpa limit tak ada kuota
   const monthYear = new Date().toISOString().slice(0, 7);
   await client.query(
     `INSERT INTO usage_credits (id, organization_id, month_year, credits_used, credits_limit, credits_purchased, created_at, updated_at)
-     VALUES (gen_random_uuid(), $1, $2, 1, 0, 0, now(), now())
+     VALUES (gen_random_uuid(), $1, $2, 1, $3, 0, now(), now())
      ON CONFLICT (organization_id, month_year)
-     DO UPDATE SET credits_used = usage_credits.credits_used + 1, updated_at = now()`,
-    [orgId, monthYear]);
+     DO UPDATE SET credits_used = usage_credits.credits_used + 1,
+                   credits_limit = GREATEST(usage_credits.credits_limit, EXCLUDED.credits_limit),
+                   updated_at = now()`,
+    [orgId, monthYear, limit]);
+}
+
+/** D1 fix: quota objective per plan (max_objectives) — dipanggil sebelum INSERT
+ *  objectives di SEMUA jalur pembuatan (POST /objectives + onboarding step5). */
+async function checkObjectiveQuota(client: PoolClient, userId: string, orgId: string, planTier: string): Promise<void> {
+  const { rows: planRows } = await client.query<{ max_objectives: number | null }>(
+    `SELECT sp.max_objectives FROM subscription_plans sp
+     WHERE sp.tier = $1 AND sp.is_active = true`, [planTier]);
+  const maxObj = planRows[0]?.max_objectives ?? 1;
+  if (maxObj === null) return; // unlimited (GROWTH/ENTERPRISE)
+  const { rows: cnt } = await client.query<{ count: number }>(
+    `SELECT count(*)::int FROM objectives WHERE user_id = $1 AND state NOT IN ('STOPPED','ACHIEVED')`,
+    [userId]);
+  if ((cnt[0]?.count ?? 0) >= maxObj) {
+    throw new ApiError(429, "RATE_LIMITED",
+      `objective limit reached (${cnt[0]?.count ?? 0}/${maxObj}) — upgrade plan untuk lebih`);
+  }
 }
 
 export class ApiError extends Error {
@@ -369,22 +405,10 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       const body = parseBody(CreateObjectiveSchema, req.body);
       const key = idemKey(req);
       if (!key) throw new ApiError(400, "VALIDATION_ERROR", "header Idempotency-Key wajib");
-      // G2: Entitlement check — FREE plan max 1 objective, STARTER max 5, dst.
+      // G2: Entitlement check — D1 fix: satu helper quota untuk semua jalur create.
       const org = await getOrgForUser(client, session.userId);
       if (!org) throw new ApiError(404, "NOT_FOUND", "organization tidak ditemukan");
-      const { rows: planRows } = await client.query<{ max_objectives: number | null }>(
-        `SELECT sp.max_objectives FROM subscription_plans sp
-         WHERE sp.tier = $1 AND sp.is_active = true`, [org.planTier]);
-      const maxObj = planRows[0]?.max_objectives ?? 1;
-      if (maxObj !== null) {
-        const { rows: cnt } = await client.query<{ count: number }>(
-          `SELECT count(*)::int FROM objectives WHERE user_id = $1 AND state NOT IN ('STOPPED','ACHIEVED')`,
-          [session.userId]);
-        if ((cnt[0]?.count ?? 0) >= maxObj) {
-          throw new ApiError(429, "RATE_LIMITED",
-            `objective limit reached (${cnt[0]?.count ?? 0}/${maxObj}) — upgrade plan untuk lebih`);
-        }
-      }
+      await checkObjectiveQuota(client, session.userId, org.id, org.planTier);
       // Idempotensi §7 idempotency_keys: key PK; hash beda → CONFLICT;
       // hash sama → replay response tersimpan (status DONE).
       // Hash dari body MENTAH (req.body) — bukan hasil Zod — sehingga key order = client order.
@@ -1363,6 +1387,8 @@ export function buildApp(opts: ApiOptions): FastifyInstance {
       const body = OnboardingStep5Schema.parse(req.body);
       const org = await getOrgForUser(client, session.userId);
       if (!org) throw new ApiError(404, "NOT_FOUND", "organization tidak ditemukan");
+      // D1 fix: step5 dulunya TANPA quota check — jalur bypass limit plan.
+      await checkObjectiveQuota(client, session.userId, org.id, org.planTier);
       // Get venture + economics (F3: capital dari step3, bukan target_profit)
       const { rows: vrows } = await client.query<{ id: string }>(
         `SELECT id FROM business_ventures WHERE organization_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT 1`,

@@ -250,3 +250,63 @@ describe("Dashboard endpoints (§36)", () => {
     expect(r2.json().approvals).toEqual([]);
   });
 });
+
+// ═══ D1: Billing entitlement enforcement (quota objective per plan) ═════════
+// Bukti bug: user FREE bisa buat 3+ objective via onboarding step5 (jalur
+// tanpa quota check). Fix: checkObjectiveQuota dipasang di SEMUA jalur create.
+describe("D1 billing quota — FREE max 1 objective", () => {
+  const uid = "22222222-2222-4222-8222-222222222222";
+
+  function quotaPool(count: number) {
+    return makePool((text) => {
+      if (/FROM users WHERE id/i.test(text)) return SESSION_OWNER as QueryResult;
+      // getOrgForUser
+      if (text.includes("FROM memberships")) {
+        return { rows: [{ id: "org-d1", name: "OrgD1", slug: "d1", plan_tier: "FREE",
+          onboarding_step: 4, onboarding_completed: null, autonomy_level: 2 }], rowCount: 1 } as unknown as QueryResult;
+      }
+      // plan max_objectives (checkObjectiveQuota)
+      if (text.includes("FROM subscription_plans")) {
+        return { rows: [{ max_objectives: 1 }], rowCount: 1 } as unknown as QueryResult;
+      }
+      // hitung objective aktif user
+      if (text.includes("count(*)::int FROM objectives")) {
+        return { rows: [{ count }], rowCount: 1 } as unknown as QueryResult;
+      }
+      return { rows: [], rowCount: 0 } as unknown as QueryResult;
+    });
+  }
+
+  it("step5 ditolak 429 saat quota FREE penuh (1 aktif)", async () => {
+    const app = buildApp({ pool: quotaPool(1), deps: deps(), webhookSecret: WH_SECRET });
+    const res = await app.inject({
+      method: "POST", url: "/onboarding/step5",
+      payload: { title: "Objek kedua", target_profit: "1000000.00" },
+      headers: { "x-user-id": uid },
+    });
+    expect(res.statusCode).toBe(429);
+    expect(res.json().error.code).toBe("RATE_LIMITED");
+    expect(res.json().error.message).toContain("objective limit reached (1/1)");
+  });
+
+  it("step5 lolos saat masih ada slot (0 aktif)", async () => {
+    const app = buildApp({ pool: quotaPool(0), deps: deps(), webhookSecret: WH_SECRET });
+    const res = await app.inject({
+      method: "POST", url: "/onboarding/step5",
+      payload: { title: "Objek pertama", target_profit: "1000000.00" },
+      headers: { "x-user-id": uid },
+    });
+    // 422 = venture belum ada (stub kosong) — tapi BUKAN 429: quota lolos.
+    expect(res.statusCode).not.toBe(429);
+  });
+
+  it("POST /objectives juga 429 saat quota penuh (jalur lama tertutup juga)", async () => {
+    const app = buildApp({ pool: quotaPool(1), deps: deps(), webhookSecret: WH_SECRET });
+    const res = await app.inject({
+      method: "POST", url: "/objectives", payload: VALID_OBJ_BODY,
+      headers: { "x-user-id": uid, "idempotency-key": "d1-key" },
+    });
+    expect(res.statusCode).toBe(429);
+    expect(res.json().error.message).toContain("objective limit reached (1/1)");
+  });
+});

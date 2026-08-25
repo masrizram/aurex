@@ -348,12 +348,14 @@ export interface RunnerResult {
 const flushCursor = new WeakMap<object, number>();
 
 // F10 fix: exported so mission-manager can flush KIMI runs after interpretResults/designMission.
+// D1 fix: flush = titik settle metering AI credit (chokepoint semua agent job).
 export async function flushModelRuns(
   client: PoolClient, provider: { readonly runs?: readonly ModelRunRecord[] }, cycleId: string | null,
 ): Promise<void> {
   const runs = provider.runs;
   if (!runs || runs.length === 0) return;
   const from = flushCursor.get(provider) ?? 0;
+  let settled = 0;
   for (let i = from; i < runs.length; i += 1) {
     const r = runs[i]!;
     const pv = await client.query<{ id: string }>(
@@ -369,8 +371,41 @@ export async function flushModelRuns(
       [cycleId, r.agent, r.purpose, pv.rows[0]!.id, r.model, r.modelVersion, r.temperature,
        r.tokenLimit, r.inputContextHash, r.outputHash, r.inputTokens, r.outputTokens,
        r.cost, r.latencyMs, r.retries, r.status, r.error]);
+    if (r.status === "SUCCEEDED" && !r.model.startsWith("mock-")) settled += 1;
   }
   flushCursor.set(provider, runs.length);
+  if (settled > 0) await consumeAiCreditsForCycle(client, cycleId, settled);
+}
+
+/**
+ * D1: settle AI credits untuk run yang baru di-flush. Org di-resolve via
+ * objective → organization_id; FREE fallback bila kolom null (obj lama).
+ * Run MOCK tidak dihitung (biaya AI nyata = 0 — mode demo tidak mengunci kuota).
+ */
+async function consumeAiCreditsForCycle(
+  client: PoolClient, cycleId: string | null, credits: number,
+): Promise<void> {
+  if (!cycleId || credits <= 0) return;
+  const { rows } = await client.query<{ org: string | null; tier: string }>(
+    `SELECT o.organization_id AS org, o.plan_tier AS tier FROM (
+       SELECT ob.organization_id FROM cycles c JOIN objectives ob ON ob.id = c.objective_id
+       WHERE c.id = $1
+     ) o, organizations o2 WHERE o2.id = o.organization_id`, [cycleId]);
+  const orgId = rows[0]?.org;
+  const tier = rows[0]?.tier ?? "FREE";
+  const { rows: planRows } = await client.query<{ max_ai_credits_monthly: number | null }>(
+    `SELECT max_ai_credits_monthly FROM subscription_plans WHERE tier = $1 AND is_active = true`, [tier]);
+  const limit = planRows[0]?.max_ai_credits_monthly;
+  if (limit === null) return; // ENTERPRISE unlimited — tanpa kuota
+  const monthYear = new Date().toISOString().slice(0, 7);
+  await client.query(
+    `INSERT INTO usage_credits (id, organization_id, month_year, credits_used, credits_limit, credits_purchased, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, 0, now(), now())
+     ON CONFLICT (organization_id, month_year)
+     DO UPDATE SET credits_used = usage_credits.credits_used + EXCLUDED.credits_used,
+                   credits_limit = GREATEST(usage_credits.credits_limit, EXCLUDED.credits_limit),
+                   updated_at = now()`,
+    [orgId, monthYear, credits, limit ?? 100]);
 }
 
 async function objectiveSummary(client: PoolClient, id: string): Promise<ObjectiveDb> {
