@@ -30,14 +30,11 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/react": "^16.3.2",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.11.6",
     "jsdom": "^30.0.1",
     "tsx": "^4.16.0",
     "typescript": "^5.5.4",
-    "vite-plugin-singlefile": "^2.3.3",
     "vitest": "^2.0.5"
   }
 }
