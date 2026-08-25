@@ -17,7 +17,8 @@
     "build:dashboard": "npm --prefix apps/dashboard run build",
     "test:ui": "npm --prefix apps/dashboard run test",
     "typecheck:ui": "npm --prefix apps/dashboard run typecheck && npm --prefix apps/landing run typecheck",
-    "build": "npm run build:landing && npm run build:dashboard"
+    "build": "npm run build:landing && npm run build:dashboard",
+    "postinstall": "npm --prefix apps/dashboard install --no-audit --no-fund && npm --prefix apps/landing install --no-audit --no-fund"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
