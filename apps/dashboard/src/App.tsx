@@ -14,10 +14,13 @@ import { BusinessesPage } from "./pages/BusinessesPage";
 import { BusinessDetailPage } from "./pages/BusinessDetailPage";
 import { ObjectivesPage } from "./pages/ObjectivesPage";
 import { ObjectiveDetailPage } from "./pages/ObjectiveDetailPage";
-import {
-  OpportunitiesPage, ExperimentsPage, MissionsPage, ApprovalsPage,
-  ResultsPage, EconomicsPage, ActivityPage,
-} from "./pages/LoopPages";
+import { OpportunitiesPage } from "./pages/loop/OpportunitiesPage";
+import { ExperimentsPage } from "./pages/loop/ExperimentsPage";
+import { MissionsPage } from "./pages/loop/MissionsPage";
+import { ApprovalsPage } from "./pages/loop/ApprovalsPage";
+import { ResultsPage } from "./pages/loop/ResultsPage";
+import { EconomicsPage } from "./pages/loop/EconomicsPage";
+import { ActivityPage } from "./pages/loop/ActivityPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 // ═════════════════════════════════════════════════════════════════
