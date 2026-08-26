@@ -24,6 +24,51 @@ function deps() {
 const UID = "33333333-3333-4333-8333-333333333333";
 const H = { "x-user-id": UID };
 
+describe("GET /billing/plan — plan + subscription + usage (P1 fix: dulu 404)", () => {
+  it("200 dengan plan tier org aktif; tenant-scoped via getOrgForUser", async () => {
+    let planQuery = "";
+    const app = buildApp({
+      pool: makePool((text) => {
+        // loadSession (X-User-Id fallback): SELECT role, is_admin FROM users WHERE id
+        if (/FROM users WHERE id/i.test(text)) return SESSION_OWNER as unknown as QueryResult;
+        // getOrgForUser → memberships/org
+        if (/FROM memberships m JOIN organizations o/.test(text))
+          return { rows: [{ id: "org-1", name: "Org", slug: "org", plan_tier: "STARTER", onboarding_step: 5, onboarding_completed: "2026-01-01", autonomy_level: 2 }], rowCount: 1 } as unknown as QueryResult;
+        if (/FROM subscription_plans sp/.test(text)) {
+          planQuery = text;
+          return { rows: [{ tier: "STARTER", name: "Starter", price_monthly: "499000.00", max_ai_credits_monthly: 1000 }], rowCount: 1 } as unknown as QueryResult;
+        }
+        if (/FROM subscriptions s/.test(text))
+          return { rows: [{ status: "ACTIVE", plan_id: "plan-1", current_period_end: "2026-09-01T00:00:00Z" }], rowCount: 1 } as unknown as QueryResult;
+        if (/FROM usage_credits/.test(text))
+          return { rows: [{ credits_used: 12, credits_limit: 1000 }], rowCount: 1 } as unknown as QueryResult;
+        return { rows: [], rowCount: 0 } as unknown as QueryResult;
+      }),
+      deps: deps(), webhookSecret: "whsec-test",
+    });
+    const res = await app.inject({ method: "GET", url: "/billing/plan", headers: H });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.plan.tier).toBe("STARTER");
+    expect(body.subscription.status).toBe("ACTIVE");
+    expect(body.usage.credits_used).toBe(12);
+    // plan tier dari org (bukan input user)
+    expect(planQuery).toMatch(/sp\.tier = \$1/);
+  });
+
+  it("tanpa organisasi → 404", async () => {
+    const app = buildApp({
+      pool: makePool((text) =>
+        /FROM users WHERE id/i.test(text)
+          ? (SESSION_OWNER as unknown as QueryResult)
+          : ({ rows: [], rowCount: 0 } as unknown as QueryResult)),
+      deps: deps(), webhookSecret: "whsec-test",
+    });
+    const res = await app.inject({ method: "GET", url: "/billing/plan", headers: H });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
 describe("POST /billing/checkout — guard konfigurasi & validasi", () => {
   it("503 BILLING_UNCONFIGURED bila env Duitku kosong", async () => {
     delete process.env.DUITKU_MERCHANT_CODE;

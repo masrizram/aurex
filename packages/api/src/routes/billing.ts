@@ -62,6 +62,31 @@ async function activateSubscription(client: PoolClient, orgId: string, planTier:
 export function registerBillingRoutes(app: FastifyInstance, ctx: RouteCtx): void {
   const { withClient, parseBody, pool } = ctx;
 
+  // ── GET /billing/plan — plan + subscription + usage (SettingsPage) ──────────
+  // P1 fix: frontend getBillingPlan() + E2E gate call this; previously 404.
+  app.get("/billing/plan", async (req) =>
+    withClient(async (client, session) => {
+      const org = await getOrgForUser(client, session.userId);
+      if (!org) throw new ApiError(404, "NOT_FOUND", "organization tidak ditemukan");
+      const plan = (await client.query<{
+        tier: string; name: string; price_monthly: string; max_ai_credits_monthly: number | null;
+      }>(
+        `SELECT sp.tier, sp.name, sp.price_monthly::text AS price_monthly,
+                sp.max_ai_credits_monthly
+         FROM subscription_plans sp
+         WHERE sp.tier = $1 AND sp.is_active = true`, [org.planTier])).rows[0] ?? null;
+      const sub = (await client.query<{ status: string; plan_id: string; current_period_end: string | null }>(
+        `SELECT s.status, s.plan_id::text AS plan_id, s.current_period_end::text AS current_period_end
+         FROM subscriptions s WHERE s.organization_id = $1 LIMIT 1`, [org.id])).rows[0] ?? null;
+      const monthYear = new Date().toISOString().slice(0, 7);
+      const usage = (await client.query<{ credits_used: number; credits_limit: number }>(
+        `SELECT credits_used, credits_limit FROM usage_credits
+         WHERE organization_id = $1 AND month_year = $2`, [org.id, monthYear])).rows[0]
+        ?? { credits_used: 0, credits_limit: 0 };
+      return { plan, subscription: sub, usage };
+    }, req),
+  );
+
   app.post("/billing/checkout", async (req) =>
     withClient(async (client, session) => {
       const cfg = requireBillingConfig();

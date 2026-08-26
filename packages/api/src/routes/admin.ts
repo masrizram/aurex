@@ -706,7 +706,7 @@ export function registerBillingAdminRoutes(app: FastifyInstance, ctx: RouteCtx):
          JOIN objectives o ON o.id = m.objective_id
          LEFT JOIN mission_versions mv ON mv.mission_id = e.mission_id AND mv.version = e.mission_version
          LEFT JOIN execution_results er ON er.execution_id = e.id
-         ${where} ORDER BY e.started_at DESC NULLS LAST, e.created_at DESC LIMIT ${limit} OFFSET ${offset}`,
+         ${where} ORDER BY e.started_at DESC NULLS LAST, e.id DESC LIMIT ${limit} OFFSET ${offset}`,
         params)).rows;
       return { executions: rows };
     }, req);

@@ -24,6 +24,16 @@ if (!ADMIN_URL || !APP_URL) {
 const ADMIN: string = ADMIN_URL;
 const APP: string = APP_URL;
 
+// ── Webhook HMAC secret — MUST be real in production ────────────────────────
+// P0 fix: a placeholder/default secret means a forged payment webhook could
+// write RECONCILED capital into the ledger. Fail-fast instead of silently
+// accepting the known default.
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+if (!WEBHOOK_SECRET || WEBHOOK_SECRET === "whsec-change-me" || WEBHOOK_SECRET.length < 16) {
+  console.error("[serve-prod] WEBHOOK_SECRET wajib diset (min 16 chars, bukan placeholder) — payment webhook HMAC tidak boleh memakai secret default.");
+  process.exit(1);
+}
+
 // ── Wait for DB to be ready ─────────────────────────────────────────────────
 async function waitForDb(url: string, maxAttempts = 30): Promise<void> {
   const pool = new Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 5000 });
@@ -71,7 +81,7 @@ console.log(`[serve-prod] agent mode: ${agents.mode} · ${agents.modelLabel}`);
 const app = buildApp({
   pool: apiPool,
   deps: { strategic: agents.strategic, execution: agents.execution, queue },
-  webhookSecret: process.env.WEBHOOK_SECRET ?? "whsec-change-me",});
+  webhookSecret: WEBHOOK_SECRET,});
 const worker = await startWorker({
   appUrl: APP, adminUrl: ADMIN, boss: boss as never,
   deps: { strategic: agents.strategic, execution: agents.execution, queue } as never,

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GATES, EconomicsError, accountBalance, achievedFromLedger,
-  capitalPlan, checkDeployment, checkExperimentBudget, computeSnapshot,
-  validateLedgerEntry, type LedgerRow,
+  assertDoubleEntryBalance, capitalPlan, checkDeployment, checkExperimentBudget,
+  computeSnapshot, validateLedgerEntry, type LedgerRow,
 } from "@aee/economics";
 
 const rows: LedgerRow[] = [
@@ -32,6 +32,16 @@ describe("ledger double-entry (D7)", () => {
     expect(accountBalance(rows, "CASH")).toBe("1200000.00");              // +1.000.000 +250.000 −50.000
     expect(accountBalance(rows, "REVENUE")).toBe("-250000.00");           // kredit-normal
     expect(accountBalance(rows, "COGS")).toBe("50000.00");                // debit-normal
+  });
+  it("invariant double-entry: konservasi saldo akun = 0 (P1 fix anti-tautologi)", () => {
+    // Buku menutup bila semua saldo akun dijumlah = 0.00.
+    const r = assertDoubleEntryBalance(rows);
+    expect(r.balanced).toBe(true);
+    expect(r.totalDebit).toBe("1300000.00");
+    expect(r.totalCredit).toBe("1300000.00");
+    // Satu postingan saja tetap seimbang (satu debit + satu credit, amount sama).
+    const single = assertDoubleEntryBalance([rows[0]!]);
+    expect(single.balanced).toBe(true);
   });
 });
 

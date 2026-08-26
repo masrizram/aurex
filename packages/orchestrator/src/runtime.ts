@@ -386,11 +386,14 @@ async function consumeAiCreditsForCycle(
   client: PoolClient, cycleId: string | null, credits: number,
 ): Promise<void> {
   if (!cycleId || credits <= 0) return;
+  // P1 fix: subquery hanya pilih organization_id; plan_tier diambil dari
+  // organizations (o2.plan_tier) — kolom o.plan_tier tidak ada.
   const { rows } = await client.query<{ org: string | null; tier: string }>(
-    `SELECT o.organization_id AS org, o.plan_tier AS tier FROM (
-       SELECT ob.organization_id FROM cycles c JOIN objectives ob ON ob.id = c.objective_id
-       WHERE c.id = $1
-     ) o, organizations o2 WHERE o2.id = o.organization_id`, [cycleId]);
+    `SELECT o.organization_id AS org, o2.plan_tier AS tier
+     FROM cycles c
+     JOIN objectives o ON o.id = c.objective_id
+     JOIN organizations o2 ON o2.id = o.organization_id
+     WHERE c.id = $1`, [cycleId]);
   const orgId = rows[0]?.org;
   const tier = rows[0]?.tier ?? "FREE";
   const { rows: planRows } = await client.query<{ max_ai_credits_monthly: number | null }>(
@@ -598,10 +601,11 @@ export async function runAgentJob(
           `INSERT INTO experiments (objective_id, opportunity_id, cycle_id, hypothesis, objective,
              budget, duration_days, success_metric, success_threshold, failure_threshold,
              kill_criteria, scale_criteria, information_gain_target, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$11::jsonb,$12,'DESIGNED')`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,'DESIGNED')`,
           [obj.id, spec.opportunity_id, cycle.id, spec.hypothesis, spec.objective, spec.budget,
            spec.duration_days, spec.success_metric, spec.success_threshold, spec.failure_threshold,
-           JSON.stringify(spec.kill_criteria), spec.information_gain_target]);
+           JSON.stringify(spec.kill_criteria), JSON.stringify(spec.scale_criteria),
+           spec.information_gain_target]);
       }
       await flushModelRuns(client, deps.strategic, cycle.id);
       const r9 = await advance(client, obj.id, "experiment_created", deps, (ctx) => ({

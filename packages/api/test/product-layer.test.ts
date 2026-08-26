@@ -266,6 +266,48 @@ describe("GET /approvals — economic decision inbox (§11)", () => {
   });
 });
 
+describe("GET /objectives/:id/forecast — skenario BEAR/BASE/BULL (§15)", () => {
+  it("200 dengan capital_approved NUMERIC(20,2) string — tanpa BigInt crash (P1 fix)", async () => {
+    let forecastQ = "";
+    const app = buildApp({
+      pool: makePool((text) => {
+        if (/FROM users WHERE id/i.test(text)) return SESSION_OWNER as unknown as QueryResult;
+        if (/FROM economic_snapshots s JOIN objectives o/.test(text)) {
+          forecastQ = text;
+          return {
+            rows: [{ revenue: "10000000.00", operating_profit: "2000000.00", capital_approved: "10000000.00" }],
+            rowCount: 1,
+          } as unknown as QueryResult;
+        }
+        if (/FROM capital_transactions/.test(text))
+          return { rows: [{ n: "1000000.00" }], rowCount: 1 } as unknown as QueryResult;
+        return { rows: [], rowCount: 0 } as unknown as QueryResult;
+      }),
+      deps: deps(), webhookSecret: "whsec-test",
+    });
+    const res = await app.inject({ method: "GET", url: "/objectives/00000000-0000-0000-0000-000000000000/forecast", headers: H });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.scenarios).toHaveLength(3);
+    // capital_remaining = approved (10jt) − deployed (1jt) = 9jt — dihitung Decimal, bukan BigInt
+    expect(Number(body.probabilityWeightedEV)).toBeGreaterThan(0);
+    // horizon default 3
+    expect(body.horizonMonths).toBe(3);
+  });
+
+  it("409 STATE_VIOLATION bila snapshot belum ada (bukan 500)", async () => {
+    const app = buildApp({
+      pool: makePool((text) =>
+        /FROM users WHERE id/i.test(text)
+          ? (SESSION_OWNER as unknown as QueryResult)
+          : ({ rows: [], rowCount: 0 } as unknown as QueryResult)),
+      deps: deps(), webhookSecret: "whsec-test",
+    });
+    const res = await app.inject({ method: "GET", url: "/objectives/00000000-0000-0000-0000-000000000000/forecast", headers: H });
+    expect(res.statusCode).toBe(409);
+  });
+});
+
 describe("GET /events — economic timeline (§16)", () => {
   it("tanpa objective_id → seluruh event tenant, terbaru dulu", async () => {
     let evQuery = "";

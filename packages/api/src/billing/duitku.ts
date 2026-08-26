@@ -11,7 +11,7 @@
  *
  * Adapter MURNI (tanpa I/O DB) dan fetch dapat disuntik untuk test.
  */
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export interface DuitkuConfig {
   readonly merchantCode: string;
@@ -51,12 +51,15 @@ export function baseUrl(cfg: DuitkuConfig): string {
   return cfg.sandbox ? "https://api-sandbox.duitku.com" : "https://api-prod.duitku.com";
 }
 
-/** Signature callback sesuai spesifikasi POP. */
+/** Signature callback sesuai spesifikasi POP (perbandingan constant-time). */
 export function isCallbackSignatureValid(p: DuitkuCallbackPayload, cfg: DuitkuConfig): boolean {
   const expected = md5(`${p.merchantCode}${p.amount}${p.merchantOrderId}${cfg.apiKey}`);
-  // bandingkan timing-safe ringan (panjang beda → langsung false)
-  return p.signature.length === expected.length &&
-    p.signature.toLowerCase() === expected.toLowerCase();
+  // P3→pre-freeze: pembandingan heksadesimal via timingSafeEqual (konstanta-waktu),
+  // bukan `===` — mencegah timing side-channel pada payment callback boundary.
+  // Cek panjang tetap diperlukan: timingSafeEqual throw bila buffer beda panjang.
+  const a = Buffer.from(p.signature.toLowerCase(), "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 type FetchLike = (url: string, init: unknown) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;

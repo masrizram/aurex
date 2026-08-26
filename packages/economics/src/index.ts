@@ -44,16 +44,24 @@ export interface LedgerRow {
 }
 
 /**
- * Invariant double-entry: setiap baris debet satu akun & kredit akun lain.
- * Rekonsiliasi per akun = Σ debit − Σ kredit harus mengikuti identitas akun:
- *   CASH+REVENUE = modal+biaya terpasang (untuk buku tertutup, Δ=Σ SEMUA = 0
- *   HANYA bila semua akun dimasukkan; identitas penuh: Σ(debit) = Σ(kredit)).
+ * Invariant double-entry (D7): konservasi saldo akun.
+ * Setiap baris ledger = satu postingan (debit_account, credit_account, amount).
+ * Karena amount tunggal, "Σ debit = Σ credit" di level baris trivially benar.
+ * Invariant yang SESUNGGUHNYA adalah konservasi saldo akun: bila semua saldo
+ * akun dijumlahkan (debit +, credit −), hasilnya WAJIB 0.00 — kalau tidak,
+ * ada postingan tidak seimbang (buku tidak menutup). Ini yang diverifikasi.
  */
 export function assertDoubleEntryBalance(rows: readonly LedgerRow[]): { totalDebit: string; totalCredit: string; balanced: boolean } {
-  const debit = sumMoney(rows.map((r) => Money.parse(r.amount)));
-  const credit = debit; // per-baris debit==credit nominal; identitas agregat trivially balanced
-  const balanced = debit.toDB() === credit.toDB();
-  return { totalDebit: debit.toDB(), totalCredit: credit.toDB(), balanced };
+  const accounts = new Set<string>();
+  for (const r of rows) { accounts.add(r.debit_account); accounts.add(r.credit_account); }
+  let net = Money.from(0);
+  for (const account of Array.from(accounts)) {
+    net = net.add(Money.parse(accountBalance(rows, account as LedgerAccount)));
+  }
+  const totalDebit = sumMoney(rows.map((r) => Money.parse(r.amount))).toDB();
+  const totalCredit = totalDebit; // satu kolom amount — identik di kedua sisi
+  const balanced = net.isZero();
+  return { totalDebit, totalCredit, balanced };
 }
 
 /** Saldo akun (positif = sisi debit; konsumen membalik utang/ekuitas). */

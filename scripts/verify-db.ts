@@ -20,14 +20,15 @@ async function main(): Promise<void> {
   if (!url) throw new Error("DATABASE_URL tidak di-set");
   const owner = ownerPool(url);
 
-  // S1: katalog pasca-migrasi (10 migrasi: core+grants+venture+tenancy+auth
-  // +onboarding_fixes+goal_type+auth_lifecycle+capital_zero+billing = 35 tabel)
+  // S1: katalog pasca-migrasi (12 migrasi: core+grants+venture+tenancy+auth
+  // +onboarding_fixes+goal_type+auth_lifecycle+capital_zero+billing
+  // +admin_ai_providers+admin_audit_detail = 35 tabel)
   const cat = await owner.query<{ n: string }>(`
     SELECT count(*)::text AS n FROM pg_tables
     WHERE schemaname='public' AND tablename NOT IN ('schema_migrations')`);
-  record("S1_table_count", cat.rows[0]?.n === "34", `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi 34`);
+  record("S1_table_count", cat.rows[0]?.n === "35", `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi 35`);
 
-  // S2: migration tercatat (10 file: 001..010)
+  // S2: migration tercatat (12 file: 001..012)
   const mig = await owner.query<{ name: string; sha256: string }>(
     "SELECT name, sha256 FROM schema_migrations ORDER BY name");
   const EXPECTED_MIGRATIONS = [
@@ -41,6 +42,8 @@ async function main(): Promise<void> {
     "008_auth_lifecycle.sql",
     "009_objectives_capital_zero.sql",
     "010_billing_duitku.sql",
+    "011_admin_ai_providers.sql",
+    "012_admin_audit_detail.sql",
   ];
   const migOk =
     mig.rowCount === EXPECTED_MIGRATIONS.length &&

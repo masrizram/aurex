@@ -12,6 +12,7 @@ import { CreateVentureRequestSchema } from "@aee/contracts";
 import { ApiError, checkAiCreditsAvailable, checkObjectiveQuota, type RouteCtx } from "../context.js";
 import { getOrgForUser } from "../auth.js";
 import { buildScenarios } from "@aee/economics";
+import { Decimal } from "decimal.js";
 
 const CreateObjectiveSchema = z.object({
   title: z.string().min(3).max(200),
@@ -23,11 +24,11 @@ const CreateObjectiveSchema = z.object({
   goal_type: z.enum(["increase_profit", "reduce_cost", "find_opportunities", "launch_new", "improve_growth"]).optional(), // G4: customer intent
   target_profit: z.string().regex(/^\d+(\.\d{1,2})?$/, "MoneyString '1000000.00'"),
   capital_approved: z.string().regex(/^\d+(\.\d{1,2})?$/),
-  horizon_months: z.number().int().min(1).max(120),
+  horizon_months: z.number().int().min(1).max(60),
   market: z.string().min(2).max(100),
   risk_tolerance: z.enum(["low", "moderate", "high"]),
   autonomy_level: z.number().int().min(0).max(4).optional(),
-  environment: z.enum(["SIMULATED", "LIVE"]).optional(),
+  environment: z.enum(["SIMULATED", "TEST", "REAL"]).optional(),
 }).strict();
 
 const StopSchema = z.object({ reason: z.string().min(3).max(500) }).strict();
@@ -86,11 +87,11 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
       }
       const objId = randomUUID();
       await client.query(
-        `INSERT INTO objectives (id, user_id, title, target_profit, capital_approved, horizon_months,
+        `INSERT INTO objectives (id, user_id, organization_id, title, target_profit, capital_approved, horizon_months,
            deadline, market, risk_tolerance, autonomy_level, state, current_cycle, environment,
            business_venture_id, business_mode, goal_type)
-                    VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,'OBJECTIVE_CREATED',0,$10,$11,$12,$13)`,
-                   [objId, session.userId, body.title, body.target_profit, body.capital_approved,
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,'OBJECTIVE_CREATED',0,$11,$12,$13,$14)`,
+                   [objId, session.userId, org.id, body.title, body.target_profit, body.capital_approved,
                     body.horizon_months, body.market, body.risk_tolerance,
                     body.autonomy_level ?? 1, body.environment ?? "SIMULATED",
                     ventureId, body.business_mode, body.goal_type ?? null]);
@@ -841,7 +842,14 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
       const result = buildScenarios({
         monthlyRevenue: s0.revenue,
         monthlyOperatingProfit: s0.operating_profit,
-        capitalRemaining: (BigInt(s0.capital_approved ?? "0") - BigInt(deployed.rows[0]?.n ?? "0")).toString(),
+        // P1 fix: NUMERIC(20,2) adalah string desimal ("1000000.00") — BigInt
+        // tidak menerima koma. Pakai decimal.js agar presisi (bukan float).
+        capitalRemaining: (() => {
+          const approved = new Decimal(s0.capital_approved ?? "0");
+          const deployedAmt = new Decimal(deployed.rows[0]?.n ?? "0");
+          const rem = approved.minus(deployedAmt);
+          return rem.isNegative() ? "0" : rem.toFixed(2);
+        })(),
         horizonMonths: horizon,
       });
       return result;

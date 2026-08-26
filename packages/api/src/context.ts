@@ -99,9 +99,14 @@ export async function checkObjectiveQuota(client: PoolClient, userId: string, or
   const row = planRows[0];
   if (row?.max_objectives === null) return; // unlimited (GROWTH/ENTERPRISE)
   const maxObj = row?.max_objectives ?? 1;    // plan hilang → konservatif 1
+  // P1 fix: quota = atribut ORGANIZATION (bukan per-user). Multi-member org
+  // tidak boleh menembus limit plan. Legacy rows (organization_id NULL)
+  // dihitung lewat user_id pemiliknya.
   const { rows: cnt } = await client.query<{ count: number }>(
-    `SELECT count(*)::int FROM objectives WHERE user_id = $1 AND state NOT IN ('STOPPED','ACHIEVED')`,
-    [userId]);
+    `SELECT count(*)::int FROM objectives
+     WHERE (organization_id = $1 OR (organization_id IS NULL AND user_id = $2))
+       AND state NOT IN ('STOPPED','ACHIEVED')`,
+    [orgId, userId]);
   if ((cnt[0]?.count ?? 0) >= maxObj) {
     throw new ApiError(429, "RATE_LIMITED",
       `objective limit reached (${cnt[0]?.count ?? 0}/${maxObj}) — upgrade plan untuk lebih`);
