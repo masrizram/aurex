@@ -83,23 +83,19 @@ source**:
 
 Unit/integrasi: `npm test` · UI: `npm run test:ui` · Pipeline integrasi penuh:
 `bash scripts/verify_pipeline.sh` (butuh Docker via WSL pada setup ini) ·
-E2E produksi: `scripts/e2e-canonical-cookie.ts`. Detail:
-[docs/testing.md](docs/testing.md).
+E2E produksi: `scripts/e2e-canonical-cookie.ts`.
 
 ## Deployment
 
 Jalur tunggal: push ke `main` → hook `pre-push` menjadwalkan
 `scripts/auto-deploy-fly.sh` → build + typecheck + test gate →
-`flyctl deploy --remote-only` → health + smoke check. Detail:
-[docs/deployment.md](docs/deployment.md).
+`flyctl deploy --remote-only` → health + smoke check.
 
 ## Dokumentasi
 
-- [docs/architecture.md](docs/architecture.md) — lapisan, boundary, desain engine
-- [docs/product-flow.md](docs/product-flow.md) — alur kanonik pelanggan
-- [docs/deployment.md](docs/deployment.md) — build, deploy, operasi
-- [docs/testing.md](docs/testing.md) — strategi & gate pengujian
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md) · [LICENSE](LICENSE)
+- [CONTRIBUTING.md](CONTRIBUTING.md) — workflow, quality gates, invariant arsitektur
+- [SECURITY.md](SECURITY.md) — kebijakan keamanan & responsible disclosure
+- [LICENSE](LICENSE)
 
 ## Lisensi
 
