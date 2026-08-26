@@ -5,7 +5,9 @@ set -euo pipefail
 # §24 secret safety: password kontainer dev dari env (lihat .env.example).
 : "${AEE_DEV_DB_PASSWORD:?Set AEE_DEV_DB_PASSWORD di .env (salin dari .env.example)}"
 docker rm -f aee-orch-pg >/dev/null 2>&1 || true
-docker run -d --name aee-orch-pg \
+# --restart unless-stopped: WSL VM bisa idle-shutdown antar panggilan dari Windows;
+# kontainer harus ikut hidup lagi saat VM naik (lihat catatan verify_pipeline.sh).
+docker run -d --name aee-orch-pg --restart unless-stopped \
   -e POSTGRES_PASSWORD="$AEE_DEV_DB_PASSWORD" -e POSTGRES_DB=aee \
   -p 55433:5432 postgres:16-alpine >/dev/null
 for i in $(seq 1 30); do
