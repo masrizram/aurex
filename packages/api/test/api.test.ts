@@ -267,10 +267,13 @@ describe("Dashboard endpoints (§36)", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("GET /approvals tanpa query → 422; dengan query → 200", async () => {
+  it("GET /approvals tanpa query → inbox lintas-objective; dengan query → 200", async () => {
+    // §11 master prompt: approvals = economic decision inbox organisasi.
+    // objective_id kini OPSIONAL (tanpa filter = seluruh objective tenant).
     const r1 = await dashApp.inject({ method: "GET", url: "/approvals",
       headers: { "x-user-id": uid } });
-    expect(r1.statusCode).toBe(422);
+    expect(r1.statusCode).toBe(200);
+    expect(Array.isArray(r1.json().approvals)).toBe(true);
     const r2 = await dashApp.inject({ method: "GET", url: "/approvals?objective_id=00000000-0000-0000-0000-000000000000",
       headers: { "x-user-id": uid } });
     expect(r2.statusCode).toBe(200);

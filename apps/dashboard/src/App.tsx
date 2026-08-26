@@ -16,6 +16,7 @@ import { ObjectivesPage } from "./pages/ObjectivesPage";
 import { ObjectiveDetailPage } from "./pages/ObjectiveDetailPage";
 import { OpportunitiesPage } from "./pages/loop/OpportunitiesPage";
 import { ExperimentsPage } from "./pages/loop/ExperimentsPage";
+import { DecisionsPage } from "./pages/loop/DecisionsPage";
 import { MissionsPage } from "./pages/loop/MissionsPage";
 import { ApprovalsPage } from "./pages/loop/ApprovalsPage";
 import { ResultsPage } from "./pages/loop/ResultsPage";
@@ -113,6 +114,7 @@ export function App() {
               <Route path="objectives/:objectiveId" element={<ObjectiveDetailPage />} />
               <Route path="opportunities" element={<OpportunitiesPage />} />
               <Route path="experiments" element={<ExperimentsPage />} />
+              <Route path="decisions" element={<DecisionsPage />} />
               <Route path="missions" element={<MissionsPage />} />
               <Route path="approvals" element={<ApprovalsPage />} />
               <Route path="results" element={<ResultsPage />} />

@@ -17,7 +17,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useTheme } from "@/context/theme-provider";
-import { getBillingPlan, getMe } from "@/api";
+import {
+  getBillingPlan, getMe, startCheckout,
+} from "@/api";
 import { useSession } from "@/lib/session";
 import { fmtNum } from "@/components/aurex-primitives";
 
@@ -209,8 +211,10 @@ function BillingSection() {
           ))}
         </div>
         <p className='text-xs text-muted-foreground'>
-          Upgrade/downgrade akan tersedia saat payment provider aktif. Saat ini perubahan plan dilakukan via tim AUREX.
+          Pembayaran diproses via Duitku (transfer/e-wallet/qris). Setelah pembayaran
+          terverifikasi, plan organisasi aktif otomatis.
         </p>
+        <CheckoutButtons currentTier={currentTier} />
       </SectionCard>
 
       <SectionCard title='AI Usage' desc='Kredit AI terpakai bulan ini.'>
@@ -232,6 +236,51 @@ function BillingSection() {
 
 function UsageSection() {
   return <BillingSection />;
+}
+
+// ── Checkout Duitku: pilih durasi → buat invoice → redirect payment URL ──────
+// 503 BILLING_UNCONFIGURED → pesan tenang (fitur belum diaktifkan admin),
+// bukan error mentah. FREE tidak bisa dibeli (bukan produk).
+function CheckoutButtons({ currentTier }: { currentTier: string }) {
+  const [period, setPeriod] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const buyable = PLANS.filter((p) => p.tier !== "FREE" && p.tier !== currentTier);
+  const handleCheckout = async (tier: string) => {
+    setBusy(true);
+    try {
+      const res = await startCheckout(tier, period);
+      window.location.href = res.payment_url;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(
+        msg.includes("BILLING_UNCONFIGURED") || msg.includes("503")
+          ? "Pembayaran online belum diaktifkan — hubungi tim AUREX untuk upgrade manual."
+          : `Checkout gagal: ${msg}`,
+      );
+      setBusy(false);
+    }
+  };
+  if (buyable.length === 0) return null;
+  return (
+    <div className='space-y-3'>
+      <div className='flex items-center gap-2 text-xs'>
+        <span className='text-muted-foreground'>Durasi:</span>
+        {[1, 3, 12].map((m) => (
+          <button key={m} type='button' onClick={() => setPeriod(m)} aria-pressed={period === m}
+            className={`rounded-md border px-2 py-1 ${period === m ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
+            {m} bln{m === 3 ? " −5%" : m === 12 ? " −15%" : ""}
+          </button>
+        ))}
+      </div>
+      <div className='flex flex-wrap gap-2'>
+        {buyable.map((p) => (
+          <Button key={p.tier} size='sm' disabled={busy} onClick={() => handleCheckout(p.tier)}>
+            {p.tier === currentTier ? "Perpanjang" : "Upgrade ke"} {p.name}
+          </Button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function AppearanceSection() {

@@ -32,7 +32,7 @@ function roleAtLeast(userRole: string, need: "auditor" | "operator" | "owner"): 
 const ERROR_CODES = [
   "VALIDATION_ERROR", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND", "CONFLICT",
   "STATE_VIOLATION", "GATE_VIOLATION", "BUDGET_EXCEEDED", "RATE_LIMITED",
-  "IDEMPOTENCY_CONFLICT", "INTERNAL",
+  "IDEMPOTENCY_CONFLICT", "BILLING_UNCONFIGURED", "INTERNAL",
 ] as const;
 type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -59,12 +59,15 @@ export class ApiError extends Error {
 
 interface UsageRowG9 { credits_used: number; credits_limit: number; credits_purchased: number }
 
+/** D9 fix: NULL = unlimited TIDAK boleh di-coerce ke fallback konservatif.
+ *  Fallback 100 hanya untuk kasus baris plan HILANG (query kosong). */
 async function aiCreditsLimit(client: PoolClient, orgId: string): Promise<number | null> {
   const { rows } = await client.query<{ limit: number | null }>(
     `SELECT sp.max_ai_credits_monthly AS "limit"
      FROM organizations o JOIN subscription_plans sp ON sp.tier = o.plan_tier AND sp.is_active = true
      WHERE o.id = $1`, [orgId]);
-  return rows[0]?.limit ?? 100; // plan row hilang → fallback konservatif FREE
+  if (!rows[0]) return 100; // plan row hilang → fallback konservatif FREE
+  return rows[0].limit;      // NULL = unlimited (ENTERPRISE)
 }
 
 export async function checkAiCreditsAvailable(client: PoolClient, orgId: string, needed = 1): Promise<void> {
@@ -86,13 +89,16 @@ export async function checkAiCreditsAvailable(client: PoolClient, orgId: string,
 }
 
 /** D1 fix: quota objective per plan (max_objectives) — dipanggil sebelum INSERT
- *  objectives di SEMUA jalur pembuatan (POST /objectives + onboarding step5). */
+ *  objectives di SEMUA jalur pembuatan (POST /objectives + onboarding step5).
+ *  D9 fix: NULL pada kolom plan = UNLIMITED — bukan nilai hilang. Coercion
+ *  `?? 1` lama membuat ENTERPRISE/GROWTH terbatas 1 objective (bug produksi). */
 export async function checkObjectiveQuota(client: PoolClient, userId: string, orgId: string, planTier: string): Promise<void> {
   const { rows: planRows } = await client.query<{ max_objectives: number | null }>(
     `SELECT sp.max_objectives FROM subscription_plans sp
      WHERE sp.tier = $1 AND sp.is_active = true`, [planTier]);
-  const maxObj = planRows[0]?.max_objectives ?? 1;
-  if (maxObj === null) return; // unlimited (GROWTH/ENTERPRISE)
+  const row = planRows[0];
+  if (row?.max_objectives === null) return; // unlimited (GROWTH/ENTERPRISE)
+  const maxObj = row?.max_objectives ?? 1;    // plan hilang → konservatif 1
   const { rows: cnt } = await client.query<{ count: number }>(
     `SELECT count(*)::int FROM objectives WHERE user_id = $1 AND state NOT IN ('STOPPED','ACHIEVED')`,
     [userId]);

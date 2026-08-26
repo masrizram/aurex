@@ -56,11 +56,20 @@ async function main(): Promise<void> {
   try {
     // S1 seed (INSERT adalah hak aee_app) — user owner dulu (objectives.user_id NOT NULL)
     // idempoten: email unik per-proses via suffix uuid pendek, ON CONFLICT tak diperlukan.
+    // §39 multi-tenancy: user TANPA organisation tidak bisa POST /objectives
+    // (entitlement resolve via memberships), jadi seed org + membership OWNER.
     const userId = randomUUID();
     const email = `verify-orch-${userId.slice(0, 8)}@local.test`;
     await client.query(
       `INSERT INTO users (id, email, password_hash, role)
        VALUES ($1, $2, 'x', 'owner')`, [userId, email]);
+    await client.query(
+      `INSERT INTO organizations (id, name, slug, plan_tier) VALUES ($1, 'Verify Org', $2, 'ENTERPRISE')`,
+      [randomUUID(), `verify-orch-${userId.slice(0, 8)}`]);
+    await client.query(
+      `INSERT INTO memberships (organization_id, user_id, role)
+       SELECT o.id, $1, 'OWNER' FROM organizations o WHERE o.slug = $2`,
+      [userId, `verify-orch-${userId.slice(0, 8)}`]);
     const objId = randomUUID();
     await client.query(
       `INSERT INTO objectives (id, user_id, title, target_profit, capital_approved, horizon_months,
@@ -381,10 +390,10 @@ async function main(): Promise<void> {
         method: "POST", headers: { ...H, "idempotency-key": iKey },
         body: JSON.stringify(objBody),
       });
-      const createdBody = await created.json() as { id: string; state: string };
+      const createdBody = await created.json() as { id: string; state: string; error?: { message?: string } };
       stage("S32 POST /objectives (owner, Idempotency-Key) → 201",
         created.status === 201 && createdBody.state === "OBJECTIVE_CREATED",
-        `status=${created.status} id=${createdBody.id}`);
+        `status=${created.status} id=${createdBody.id} err=${createdBody.error?.message ?? "-"}`);
 
       const replay = await fetch(`${base}/objectives`, {
         method: "POST", headers: { ...H, "idempotency-key": iKey },
@@ -402,22 +411,33 @@ async function main(): Promise<void> {
         started.status === 200 && !!startedBody.cycle_id,
         `status=${started.status} cycle=${startedBody.cycle_id}`);
 
-      // worker loop sampai gerbang autonomy 1 → HUMAN_APPROVAL_REQUIRED
-      let gateReached = false; let apiState = "";
-      for (let i = 0; i < 12 && !gateReached; i++) {
+      // worker loop sampai gerbang autonomy 1 → HUMAN_APPROVAL_REQUIRED.
+      // §19: autonomy 1 → setelah research engine MENUNGGU keputusan manusia;
+      // fixture mendelegasikan lewat API resmi let-aurex-decide (bukan bypass FSM).
+      let gateReached = false; let apiState = ""; let loopNote = "-"; let delegated = false;
+      for (let i = 0; i < 24 && !gateReached; i++) {
         const job = apiDeps.queue.jobs.shift();
-        if (!job) break;
+        if (!job) {
+          if (!delegated && apiState === "OPPORTUNITIES_RANKED") {
+            const del = await fetch(`${base}/objectives/${createdBody.id}/let-aurex-decide`,
+              { method: "POST", headers: H, body: "{}" });
+            delegated = true;
+            loopNote = `delegasi pilihan ke AUREX (${del.status})`;
+            continue;
+          }
+          loopNote = `queue kosong di iterasi ${i} state=${apiState}`; break;
+        }
         const c2 = await appPool.connect();
         try {
           const out = await runAgentJob(c2, job, apiDeps);
-          if (!out.ok) break;
+          if (!out.ok) { loopNote = `job=${String(job.kind)} gagal: ${"reason" in out ? String(out.reason) : "?"}`; break; }
           const st = (await c2.query<{ state: string }>(
             `SELECT state FROM objectives WHERE id=$1`, [createdBody.id])).rows[0];
           apiState = st?.state ?? "";
           gateReached = apiState === "HUMAN_APPROVAL_REQUIRED";
         } finally { c2.release(); }
       }
-      stage("S34 worker loop sampai gerbang", gateReached, `state=${apiState}`);
+      stage("S34 worker loop sampai gerbang", gateReached, `state=${apiState} ${loopNote}`);
 
       if (gateReached) {
         const apRow = (await client.query<{ id: string }>(
@@ -517,6 +537,14 @@ async function main(): Promise<void> {
       await client.query(
         `INSERT INTO users (id, email, password_hash, role) VALUES ($1,$2,'x','owner')`,
         [userId4, `verify-s40-${userId4.slice(0, 8)}@local.test`]);
+      // §39: API butuh organisation + membership utk entitlement POST /objectives
+      await client.query(
+        `INSERT INTO organizations (id, name, slug, plan_tier) VALUES ($1, 'Verify Org 4', $2, 'ENTERPRISE')`,
+        [randomUUID(), `verify-s40-${userId4.slice(0, 8)}`]);
+      await client.query(
+        `INSERT INTO memberships (organization_id, user_id, role)
+         SELECT o.id, $1, 'OWNER' FROM organizations o WHERE o.slug = $2`,
+        [userId4, `verify-s40-${userId4.slice(0, 8)}`]);
 
       const bossQueue = new PgBossQueue(boss as never);
       const workerDeps = {
@@ -553,10 +581,13 @@ async function main(): Promise<void> {
         `create=${create4.status} start=${start4.status}`);
 
       // Tunggu worker: autonomy 3 → siklus penuh tanpa intervensi manusia.
-      // Berhenti saat gerbang/terminal atau timeout 30s.
+      // Berhenti saat gerbang/terminal atau timeout. Window 90s (sebelumnya 30s):
+      // polling pg-boss melalui port-forward WSL bisa tertelan idle-throttle —
+      // assertion tetap processed>=4 + mencapai gerbang, hanya kesabarannya yang
+      // disesuaikan dengan realitas infrastruktur dev (bukan pelemahan test).
       let finalState4 = "";
       const t0 = Date.now();
-      while (Date.now() - t0 < 30_000) {
+      while (Date.now() - t0 < 90_000) {
         const st = (await client.query<{ state: string }>(
           `SELECT state FROM objectives WHERE id=$1`, [obj4.id])).rows[0];
         finalState4 = st?.state ?? "";

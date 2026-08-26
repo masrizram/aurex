@@ -20,19 +20,31 @@ async function main(): Promise<void> {
   if (!url) throw new Error("DATABASE_URL tidak di-set");
   const owner = ownerPool(url);
 
-  // S1: katalog pasca-migrasi
+  // S1: katalog pasca-migrasi (10 migrasi: core+grants+venture+tenancy+auth
+  // +onboarding_fixes+goal_type+auth_lifecycle+capital_zero+billing = 35 tabel)
   const cat = await owner.query<{ n: string }>(`
     SELECT count(*)::text AS n FROM pg_tables
     WHERE schemaname='public' AND tablename NOT IN ('schema_migrations')`);
-  record("S1_table_count", cat.rows[0]?.n === "25", `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi 25 (+business_ventures)`);
+  record("S1_table_count", cat.rows[0]?.n === "34", `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi 34`);
 
-  // S2: migration tercatat (Phase 6: 001 + 002)
+  // S2: migration tercatat (10 file: 001..010)
   const mig = await owner.query<{ name: string; sha256: string }>(
     "SELECT name, sha256 FROM schema_migrations ORDER BY name");
-  const migOk = mig.rowCount === 3
-    && mig.rows[0]?.name === "001_core_schema.sql"
-    && mig.rows[1]?.name === "002_orchestrator_grants.sql"
-    && mig.rows[2]?.name === "003_business_venture.sql";
+  const EXPECTED_MIGRATIONS = [
+    "001_core_schema.sql",
+    "002_orchestrator_grants.sql",
+    "003_business_venture.sql",
+    "004_multi_tenancy.sql",
+    "005_auth_onboarding.sql",
+    "006_onboarding_fixes.sql",
+    "007_objective_goal_type.sql",
+    "008_auth_lifecycle.sql",
+    "009_objectives_capital_zero.sql",
+    "010_billing_duitku.sql",
+  ];
+  const migOk =
+    mig.rowCount === EXPECTED_MIGRATIONS.length &&
+    EXPECTED_MIGRATIONS.every((name, i) => mig.rows[i]?.name === name);
   record("S2_migration_recorded", migOk,
     `${mig.rows.map((r) => `${r.name}:${r.sha256.slice(0, 16)}`).join(",")}`);
 

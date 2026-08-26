@@ -46,36 +46,212 @@ export type Decision = {
   recommendation?: string; confidence?: number; rationale?: string;
 };
 
+export type VerifiedValue = { revenue: string; cost: string };
+
+export type LifecycleCounts = {
+  opportunities: number; experiments: number; missions: number;
+  decisions: number; results: number; approvals_pending: number;
+};
+
 export type ObjectiveDetail = {
   id: string; title: string; status: string; stage: string;
   industry: string | null; business_mode: string; progress: number;
   environment: string;
+  goal_type?: string | null;
+  created_at?: string | null; deadline?: string | null;
+  horizon_months?: number | null; target_profit?: string | null;
+  capital_approved?: string | null; autonomy_level?: number | null;
+  current_cycle?: number | null;
   business: BusinessVenture | null;
   economics: Economics | null;
   strategy: Strategy | null;
   execution: Execution | null;
   result: Result | null;
   decision: Decision | null;
-  events: AeeEvent[];
+  /** Snapshot ledger terbaru (turunan — bukan klaim LLM). */
+  snapshot: {
+    revenue?: string; cogs?: string; gross_profit?: string; gross_margin?: string;
+    opex?: string; operating_profit?: string; capital_deployed?: string;
+    capital_remaining?: string; drawdown?: string; roi?: string; created_at?: string;
+  } | null;
+  /** Nilai TERVERIFIKASI: hanya ledger RECONCILED (bukti pembayaran). */
+  verified: VerifiedValue;
+  counts: LifecycleCounts;
 };
 
+// ── Opportunity penuh (§6): skor komposit engine eksplisit ──
 export type OppSummary = {
   id: string; name: string; status: string;
   customer_segment: string; problem: string; solution: string;
-  business_model: string; capital_required: string | null;
-  expected_revenue: string | null; risk_score: number | null;
-  risk_adjusted_score: number | null;
+  business_model: string;
+  price: string | null; revenue_potential: string | null;
+  cost_estimate: string | null; margin: string | null;
+  capital_required: string | null; time_to_revenue_days: number | null;
+  demand_score: number | null; willingness_to_pay_score: number | null;
+  profitability_score: number | null; scalability_score: number | null;
+  defensibility_score: number | null; execution_feasibility_score: number | null;
+  evidence_strength_score: number | null; time_to_revenue_score: number | null;
+  risk_score: number | null; opportunity_score: number | null;
+  risk_adjusted_score: number | null; probability_of_success: string | null;
+  expected_value: string | null;
+  assumptions: unknown[]; unknowns: unknown[];
 };
+
+// ── Experiment / Mission / Result / Economics row (§7/§10/§12/§14) ──
+export type ExperimentRow = {
+  id: string; hypothesis: string | null; objective: string | null;
+  budget: string | null; spent: string | null; duration_days: number | null;
+  success_metric: string | null; success_threshold: string | null;
+  failure_threshold: string | null; kill_criteria: unknown;
+  scale_criteria: unknown; information_gain_target: number | null;
+  status: string; result: unknown; measured_value: string | null;
+  created_at: string; opportunity_name: string | null;
+};
+
+export type MissionRow = {
+  id: string; status: string; priority: string | null;
+  created_at: string; version: number | null;
+  package: Record<string, unknown> | null; package_hash: string | null;
+  opportunity_name: string | null; execution_count: number;
+};
+
+export type ResultRow = {
+  id: string; verification_tier: string;
+  revenue_claimed: string | null; cost_claimed: string | null;
+  payload: Record<string, unknown> | null; created_at: string;
+  execution_status: string | null; provider?: string | null; attempt?: number | null;
+  started_at?: string | null; finished_at?: string | null;
+  mission_id: string | null; opportunity_name: string | null;
+};
+
+export type EconomicsSnapshotRow = {
+  revenue: string | null; cogs: string | null; gross_profit: string | null;
+  gross_margin: string | null; opex: string | null; operating_profit: string | null;
+  capital_deployed: string | null; capital_remaining: string | null;
+  drawdown: string | null; roi: string | null; created_at: string | null;
+};
+
+export type EconomicsPayload = {
+  snapshots: EconomicsSnapshotRow[];
+  target: { target_profit: string; capital_approved: string } | null;
+  baseline: EconomicsSnapshotRow | null;
+  current: EconomicsSnapshotRow | null;
+  verified: VerifiedValue;
+};
+
+export type DecisionRow = {
+  id: string; decision: string; reason: string | null;
+  confidence: string | null; evidence_ids: unknown;
+  decided_by: string | null; created_at: string;
+};
+
+// ── GET /overview payload (§2 Economic Control Center) ──
+export type OverviewScoreboard = {
+  objectives_total: number; objectives_active: number;
+  revenue: number; cogs: number; gross_profit: number;
+  gross_margin: number | null; operating_profit: number;
+  capital_approved: number; capital_deployed: number; capital_remaining: number;
+  portfolio_roi: number | null;
+  verified_revenue: number; verified_cost: number;
+};
+
+export type OverviewTrajectoryPoint = {
+  objective_id: string; objective_title: string;
+  revenue: string; cogs: string; gross_profit: string; gross_margin: string | null;
+  opex: string; operating_profit: string; capital_deployed: string;
+  capital_remaining: string; drawdown: string; roi: string | null; created_at: string;
+};
+
+export type OverviewAttention = {
+  pending_approvals: Approval[];
+  blocked_objectives: { id: string; title: string; state: string }[];
+  failed_executions: {
+    id: string; status: string; objective_id: string;
+    finished_at: string | null; mission_title: string | null; objective_title: string;
+  }[];
+};
+
+export type OverviewCounts = {
+  experiments_by_status: { status: string; count: number }[];
+  experiments_total: number;
+  decisions_by_type: { decision: string; count: number }[];
+  decisions_total: number;
+  missions_by_status: { status: string; count: number }[];
+  missions_total: number;
+};
+
+export type OverviewPayload = {
+  scoreboard: OverviewScoreboard;
+  trajectory: OverviewTrajectoryPoint[];
+  attention: OverviewAttention;
+  counts: OverviewCounts;
+  events: {
+    id: string; objective_id: string; event_type: string;
+    payload: Record<string, unknown> | null; created_at: string;
+    objective_title: string;
+  }[];
+};
+
+export async function getOverview(): Promise<OverviewPayload> {
+  return api<OverviewPayload>("GET", "/overview");
+}
+
+// ── AI accountability §17 — agregasi tabel model_runs (jejak run nyata) ──
+export type AiEconomicsRow = {
+  agent: string; purpose: string; runs: number;
+  succeeded: number; failed: number;
+  input_tokens: string; output_tokens: string;
+  cost: string | null; avg_latency_ms: number;
+};
+
+export async function getAiEconomics(): Promise<{ by_agent_purpose: AiEconomicsRow[] }> {
+  return api("GET", "/ai-economics");
+}
+
+// ── Forecast §15 — skenario BEAR/BASE/BULL dari snapshot terbaru ────────────
+// Semua angka PROJECTED (bukan verified) — kalkulasi deterministik di BE.
+export type ForecastRow = {
+  name: "BEAR" | "BASE" | "BULL";
+  revenueDelta: string; projectedMonthlyRevenue: string;
+  projectedMonthlyProfit: string; projectedTotalProfit: string;
+  probability: string;
+};
+
+export type ForecastPayload = {
+  horizonMonths: number;
+  scenarios: readonly ForecastRow[];
+  probabilityWeightedEV: string;
+  paybackMonths: number | null;
+};
+
+export async function getForecast(objectiveId: string, horizon = 3): Promise<ForecastPayload> {
+  return api("GET", `/objectives/${objectiveId}/forecast?horizon=${horizon}`);
+}
+
+// ── Billing checkout Duitku — buat invoice & arahkan ke payment URL ─────────
+export type CheckoutResponse = { order_id: string; payment_url: string; reference: string };
+
+export async function startCheckout(planTier: string, periodMonths: number): Promise<CheckoutResponse> {
+  return api("POST", "/billing/checkout", { plan_tier: planTier, period_months: periodMonths });
+}
 
 export type AeeEvent = {
   id?: string; event_type: string; type?: string;
   created_at: string; stage: string; message?: string;
   payload?: Record<string, unknown> | null;
+  objective_id?: string; objective_title?: string;
 };
 
 export type Approval = {
-  id: string; decision_type: string; stage: string;
-  status: string; version: number; payload?: Record<string, unknown> | null;
+  id: string; objective_id?: string; category: string; status: string;
+  resume_state?: string | null;
+  payload?: Record<string, unknown> | null;
+  // Decision pack (§11): kolom asli tabel approvals
+  why_required?: string | null; what_will_happen?: string | null;
+  capital_at_risk?: string | null; expected_upside?: string | null;
+  expected_downside?: string | null; expires_at?: string | null;
+  decided_by?: string | null; decided_at?: string | null; created_at?: string | null;
+  objective_title?: string | null;
 };
 
 export type CreateResult = { id: string; objective?: { id: string } };
@@ -157,7 +333,7 @@ export async function getObjectiveDetail(id: string): Promise<ObjectiveDetail> {
 
 function mapDetail(raw: any): ObjectiveDetail {
   const obj = raw.objective || raw;
-  const snap = raw.snapshot || obj.snapshot;
+  const snap = raw.snapshot ?? obj.snapshot ?? null;
   const biz = raw.business || obj.business;
   const dec = raw.last_decision || obj.last_decision || raw.decision;
   return {
@@ -169,21 +345,49 @@ function mapDetail(raw: any): ObjectiveDetail {
     business_mode: obj.business_mode || "DISCOVERY",
     progress: typeof obj.progress === "number" ? obj.progress : 0,
     environment: obj.environment || "SIMULATED",
+    goal_type: obj.goal_type ?? null,
+    created_at: obj.created_at ?? null,
+    deadline: obj.deadline ?? null,
+    horizon_months: obj.horizon_months ?? null,
+    target_profit: obj.target_profit ?? null,
+    capital_approved: obj.capital_approved ?? null,
+    autonomy_level: obj.autonomy_level ?? null,
+    current_cycle: obj.current_cycle ?? null,
     business: biz || null,
     economics: snap ? {
       revenue_target: snap.revenue ? Number(snap.revenue) : undefined,
-      operating_profit: snap.operating_profit ? Number(snap.operating_profit) : undefined,
-      roi: snap.roi,
+      operating_profit: snap.operating_profit != null && snap.operating_profit !== ""
+        ? Number(snap.operating_profit) : undefined,
+      roi: snap.roi != null && snap.roi !== "" ? Number(snap.roi) : undefined,
+      gross_margin: snap.gross_margin != null && snap.gross_margin !== ""
+        ? Number(snap.gross_margin) : undefined,
     } : (raw.economics || null),
     strategy: raw.strategy || null,
     execution: raw.execution || null,
     result: raw.result || null,
     decision: dec ? {
       recommendation: dec.decision || dec.recommendation,
-      confidence: dec.confidence,
+      confidence: dec.confidence != null && dec.confidence !== "" ? Number(dec.confidence) : undefined,
       rationale: dec.reason || dec.rationale,
     } : null,
-    events: [],
+    snapshot: snap ? {
+      revenue: snap.revenue ?? undefined,
+      cogs: snap.cogs ?? undefined,
+      gross_profit: snap.gross_profit ?? undefined,
+      gross_margin: snap.gross_margin ?? undefined,
+      opex: snap.opex ?? undefined,
+      operating_profit: snap.operating_profit ?? undefined,
+      capital_deployed: snap.capital_deployed ?? undefined,
+      capital_remaining: snap.capital_remaining ?? undefined,
+      drawdown: snap.drawdown ?? undefined,
+      roi: snap.roi ?? undefined,
+      created_at: snap.created_at ?? undefined,
+    } : null,
+    verified: raw.verified ?? { revenue: "0", cost: "0" },
+    counts: raw.counts ?? {
+      opportunities: 0, experiments: 0, missions: 0,
+      decisions: 0, results: 0, approvals_pending: 0,
+    },
   };
 }
 
@@ -199,31 +403,45 @@ export async function stopObjective(id: string, reason: string): Promise<unknown
   return api("POST", `/objectives/${id}/stop`, { reason }, { "idempotency-key": idemKey("stop") });
 }
 
-export async function listApprovals(objectiveId: string): Promise<Approval[]> {
+export async function listApprovals(objectiveId?: string): Promise<Approval[]> {
   try {
-    const res = await api<{ approvals: any[] }>("GET", `/approvals?objective_id=${objectiveId}`);
-    return (res.approvals || []).map(a => ({
+    const path = objectiveId ? `/approvals?objective_id=${encodeURIComponent(objectiveId)}` : "/approvals";
+    const res = await api<{ approvals: any[] }>("GET", path);
+    return (res.approvals || []).map((a) => ({
       id: a.id,
-      decision_type: a.category || a.kind || a.decision_type || "UNKNOWN",
-      stage: a.resume_state || a.stage || "UNKNOWN",
+      objective_id: a.objective_id ?? undefined,
+      category: a.category || "UNKNOWN",
       status: a.status || "PENDING",
-      version: 0,
+      resume_state: a.resume_state ?? null,
       payload: a.payload || null,
+      why_required: a.why_required ?? null,
+      what_will_happen: a.what_will_happen ?? null,
+      capital_at_risk: a.capital_at_risk ?? null,
+      expected_upside: a.expected_upside ?? null,
+      expected_downside: a.expected_downside ?? null,
+      expires_at: a.expires_at ?? null,
+      decided_by: a.decided_by ?? null,
+      decided_at: a.decided_at ?? null,
+      created_at: a.created_at ?? null,
+      objective_title: a.objective_title ?? null,
     }));
   } catch { return []; }
 }
 
-export async function approveDecision(approvalId: string): Promise<void> {
-  await api("POST", `/approvals/${approvalId}/approve`, { version: 0 }, { "idempotency-key": idemKey("ap") });
+export async function approveDecision(approvalId: string, note?: string): Promise<void> {
+  // Backend ApprovalNoteSchema .strict({note}) — version TIDAK ada di kontrak
+  // (approve pakai transisi status + optimistic FSM, bukan row version).
+  await api("POST", `/approvals/${approvalId}/approve`, note ? { note } : {});
 }
 
 export async function rejectDecision(approvalId: string, reason = "dashboard"): Promise<void> {
   await api("POST", `/approvals/${approvalId}/reject`, { reason }, { "idempotency-key": idemKey("rj") });
 }
 
-export async function listEvents(objectiveId: string): Promise<AeeEvent[]> {
+export async function listEvents(objectiveId?: string): Promise<AeeEvent[]> {
   try {
-    const res = await api<{ events: any[] }>("GET", `/events?objective_id=${objectiveId}`);
+    const path = objectiveId ? `/events?objective_id=${encodeURIComponent(objectiveId)}` : "/events";
+    const res = await api<{ events: any[] }>("GET", path);
     return (res.events || []).map(e => ({
       id: e.id,
       event_type: e.event_type || e.type || "UNKNOWN",
@@ -231,13 +449,15 @@ export async function listEvents(objectiveId: string): Promise<AeeEvent[]> {
       stage: e.stage || (e.payload?.stage as string) || "—",
       message: e.message || (e.payload?.message as string) || (typeof e.payload === "string" ? e.payload : undefined),
       payload: e.payload || null,
+      objective_id: e.objective_id ?? undefined,
+      objective_title: e.objective_title ?? undefined,
     }));
   } catch { return []; }
 }
 
 export async function listOpportunities(objectiveId: string): Promise<OppSummary[]> {
   try {
-    const res = await api<{ opportunities: any[] }>(`GET`, `/objectives/${objectiveId}/opportunities`);
+    const res = await api<{ opportunities: any[] }>(`GET`, `/objectives/${encodeURIComponent(objectiveId)}/opportunities`);
     return (res.opportunities || []).map(o => ({
       id: o.id,
       name: o.name || "—",
@@ -246,10 +466,27 @@ export async function listOpportunities(objectiveId: string): Promise<OppSummary
       problem: o.problem || "—",
       solution: o.solution || "—",
       business_model: o.business_model || "—",
-      capital_required: o.capital_required || null,
-      expected_revenue: o.revenue_potential || null,
+      price: o.price ?? null,
+      revenue_potential: o.revenue_potential ?? null,
+      cost_estimate: o.cost_estimate ?? null,
+      margin: o.margin ?? null,
+      capital_required: o.capital_required ?? null,
+      time_to_revenue_days: o.time_to_revenue_days ?? null,
+      demand_score: o.demand_score ?? null,
+      willingness_to_pay_score: o.willingness_to_pay_score ?? null,
+      profitability_score: o.profitability_score ?? null,
+      scalability_score: o.scalability_score ?? null,
+      defensibility_score: o.defensibility_score ?? null,
+      execution_feasibility_score: o.execution_feasibility_score ?? null,
+      evidence_strength_score: o.evidence_strength_score ?? null,
+      time_to_revenue_score: o.time_to_revenue_score ?? null,
       risk_score: o.risk_score ?? null,
+      opportunity_score: o.opportunity_score ?? null,
       risk_adjusted_score: o.risk_adjusted_score ?? null,
+      probability_of_success: o.probability_of_success ?? null,
+      expected_value: o.expected_value ?? null,
+      assumptions: Array.isArray(o.assumptions) ? o.assumptions : [],
+      unknowns: Array.isArray(o.unknowns) ? o.unknowns : [],
     }));
   } catch { return []; }
 }
@@ -374,20 +611,20 @@ export async function saveOpportunity(objectiveId: string, oppId: string, note?:
 }
 
 // ── Product layer §20-27 ──
-export async function listExperiments(objectiveId: string): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/experiments`);
+export async function listExperiments(objectiveId: string): Promise<{ experiments: ExperimentRow[] }> {
+  return api("GET", `/objectives/${encodeURIComponent(objectiveId)}/experiments`);
 }
-export async function listMissions(objectiveId: string): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/missions`);
+export async function listMissions(objectiveId: string): Promise<{ missions: MissionRow[] }> {
+  return api("GET", `/objectives/${encodeURIComponent(objectiveId)}/missions`);
 }
-export async function listResults(objectiveId: string): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/results`);
+export async function listResults(objectiveId: string): Promise<{ results: ResultRow[] }> {
+  return api("GET", `/objectives/${encodeURIComponent(objectiveId)}/results`);
 }
-export async function getEconomics(objectiveId: string): Promise<any> {
-  return api("GET", `/objectives/${objectiveId}/economics`);
+export async function getEconomics(objectiveId: string): Promise<EconomicsPayload> {
+  return api("GET", `/objectives/${encodeURIComponent(objectiveId)}/economics`);
 }
-export async function listDecisions(objectiveId: string): Promise<{ decisions: any[] }> {
-  return api("GET", `/decisions?objective_id=${objectiveId}`);
+export async function listDecisions(objectiveId: string): Promise<{ decisions: DecisionRow[] }> {
+  return api("GET", `/decisions?objective_id=${encodeURIComponent(objectiveId)}`);
 }
 
 // ── Billing ──

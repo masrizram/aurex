@@ -253,3 +253,11 @@ export function computeOpportunityScores(inp: ScoreInput): OpportunityScores {
 }
 
 export { Money, MoneyError, Ratio, sumMoney };
+
+export {
+  buildScenarios,
+  type ScenarioName,
+  type ScenarioInput,
+  type ScenarioRow,
+  type ScenarioResult,
+} from "./scenarios.js";

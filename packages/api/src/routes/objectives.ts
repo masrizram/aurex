@@ -11,6 +11,7 @@ import { advance, type AgentJobKind } from "@aee/orchestrator/runtime";
 import { CreateVentureRequestSchema } from "@aee/contracts";
 import { ApiError, checkAiCreditsAvailable, checkObjectiveQuota, type RouteCtx } from "../context.js";
 import { getOrgForUser } from "../auth.js";
+import { buildScenarios } from "@aee/economics";
 
 const CreateObjectiveSchema = z.object({
   title: z.string().min(3).max(200),
@@ -110,6 +111,7 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
         `SELECT o.id, o.title, o.state, o.row_version, o.current_cycle, o.autonomy_level,
                 o.target_profit::text AS target_profit, o.capital_approved::text AS capital_approved,
                 o.horizon_months, o.market, o.risk_tolerance, o.business_mode, o.environment,
+                o.goal_type,
                 v.id AS venture_id, v.name AS venture_name, v.industry AS venture_industry,
                 v.market AS venture_market, v.target_customer AS venture_target_customer,
                 v.problem AS venture_problem, v.solution AS venture_solution,
@@ -143,9 +145,39 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
          FROM decisions WHERE objective_id = $1 ORDER BY created_at DESC LIMIT 1`, [req.params.id])).rows[0] ?? null;
       const snap = (await client.query(
         `SELECT revenue::text, cogs::text, gross_profit::text, gross_margin::text,
-                opex::text, operating_profit::text, drawdown::text, created_at
+                opex::text, operating_profit::text, capital_deployed::text,
+                capital_remaining::text, drawdown::text, roi::text, created_at
          FROM economic_snapshots WHERE objective_id = $1 ORDER BY created_at DESC LIMIT 1`,
         [req.params.id])).rows[0] ?? null;
+      // ── Nilai TERVERIFIKASI (ledger RECONCILED saja — Rule 4/§5) ──
+      const ver = (await client.query<{ verified_revenue: string; verified_cost: string }>(
+        `SELECT COALESCE(sum(amount) FILTER (WHERE credit_account='REVENUE'),0)::text AS verified_revenue,
+                COALESCE(sum(amount) FILTER (WHERE debit_account='COGS'),0)::text AS verified_cost
+         FROM capital_transactions
+         WHERE objective_id = $1 AND verification_tier = 'RECONCILED'`, [req.params.id])).rows[0]
+        ?? { verified_revenue: "0", verified_cost: "0" };
+      // ── Hitungan entitas lifecycle untuk tab + traceability (§28) ──
+      const counts = (await client.query<{
+        opportunities: number; experiments: number; missions: number;
+        decisions: number; results: number; approvals_pending: number;
+      }>(
+        `SELECT
+           (SELECT count(*)::int FROM opportunities WHERE objective_id = $1) AS opportunities,
+           (SELECT count(*)::int FROM experiments WHERE objective_id = $1) AS experiments,
+           (SELECT count(*)::int FROM missions WHERE objective_id = $1) AS missions,
+           (SELECT count(*)::int FROM decisions WHERE objective_id = $1) AS decisions,
+           (SELECT count(*)::int FROM execution_results er
+              JOIN executions ex ON ex.id = er.execution_id
+              JOIN missions m ON m.id = ex.mission_id WHERE m.objective_id = $1) AS results,
+           (SELECT count(*)::int FROM approvals WHERE objective_id = $1 AND status = 'PENDING') AS approvals_pending`,
+        [req.params.id])).rows[0]
+        ?? { opportunities: 0, experiments: 0, missions: 0, decisions: 0, results: 0, approvals_pending: 0 };
+      // ── Timestamp lifecycle: created_at + deadline turunan horizon ──
+      const objTimes = (await client.query<{ created_at: string; deadline: string | null }>(
+        `SELECT created_at::text AS created_at,
+                deadline::text AS deadline
+         FROM objectives WHERE id = $1`, [req.params.id])).rows[0]
+        ?? { created_at: null as unknown as string, deadline: null };
       return {
         objective: {
           id: o.id, title: o.title, state: o.state, row_version: o.row_version,
@@ -154,6 +186,9 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
           horizon_months: o.horizon_months, market: o.market,
           risk_tolerance: o.risk_tolerance, business_mode: o.business_mode,
           environment: o.environment ?? "SIMULATED",
+          goal_type: o.goal_type ?? null,
+          created_at: objTimes.created_at,
+          deadline: objTimes.deadline,
         },
         business: o.venture_id ? {
           id: o.venture_id, name: o.venture_name, industry: o.venture_industry,
@@ -166,6 +201,11 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
         execution: exec,
         last_decision: dec,
         snapshot: snap,
+        verified: {
+          revenue: ver.verified_revenue,
+          cost: ver.verified_cost,
+        },
+        counts,
       };
     }, req),
   );
@@ -177,8 +217,18 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
       await requireOwnedObjective(client, req.params.id, session);
       const rows = (await client.query(
         `SELECT opp.id, opp.name, opp.status, opp.customer_segment, opp.problem, opp.solution,
-                opp.business_model, opp.capital_required::text, opp.revenue_potential::text,
-                opp.risk_score, opp.opportunity_score, opp.risk_adjusted_score
+                opp.business_model, opp.price::text AS price,
+                opp.revenue_potential::text AS revenue_potential,
+                opp.cost_estimate::text AS cost_estimate, opp.margin::text AS margin,
+                opp.capital_required::text AS capital_required,
+                opp.time_to_revenue_days,
+                opp.demand_score, opp.willingness_to_pay_score, opp.profitability_score,
+                opp.scalability_score, opp.defensibility_score, opp.execution_feasibility_score,
+                opp.evidence_strength_score, opp.time_to_revenue_score,
+                opp.risk_score, opp.opportunity_score, opp.risk_adjusted_score,
+                opp.probability_of_success::text AS probability_of_success,
+                opp.expected_value::text AS expected_value,
+                opp.assumptions, opp.unknowns
          FROM cycles c
          JOIN opportunities opp ON opp.cycle_id = c.id
          JOIN objectives ob ON ob.id = c.objective_id
@@ -410,14 +460,19 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
   app.get("/events", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "auditor");
-      const q = req.query as { objective_id?: string };
-      if (!q.objective_id) throw new ApiError(422, "VALIDATION_ERROR", "query objective_id wajib");
+      // objective_id OPSIONAL (§16 master prompt): timeline ekonomi lintas
+      // objective untuk Overview/Activity. Tenant scope tetap via o.user_id.
+      const q = req.query as { objective_id?: string; limit?: string };
+      const limitRaw = Number(q.limit ?? "100");
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 100;
       const rows = (await client.query(
-        `SELECT e.id, e.type, e.payload, e.created_at FROM events e
+        `SELECT e.id, e.objective_id, e.type AS event_type, e.type, e.payload, e.created_at,
+                o.title AS objective_title
+         FROM events e
          JOIN objectives o ON o.id = e.objective_id
-         WHERE e.objective_id = $1 AND o.user_id = $2
-         ORDER BY e.created_at DESC LIMIT 100`,
-        [q.objective_id, session.userId])).rows;
+         WHERE ($1::uuid IS NULL OR e.objective_id = $1::uuid) AND o.user_id = $2
+         ORDER BY e.created_at DESC LIMIT ${limit}`,
+        [q.objective_id ?? null, session.userId])).rows;
       return { events: rows };
     }, req),
   );
@@ -456,19 +511,177 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
     }, req),
   );
 
+  // ── GET /overview — Economic Control Center aggregate (§2 master prompt) ───
+  // Satu round-trip untuk scoreboard + trajectory + attention queue Overview.
+  // SEMUA angka ekonomi berasal dari economic_snapshots TURUNAN LEDGER atau
+  // capital_transactions RECONCILED — tidak ada klaim LLM di jalur ini (Rule 4).
+  app.get("/overview", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      const uid = session.userId;
+
+      // 1. Objectives ringkas
+      const { rows: objectives } = await client.query(
+        `SELECT o.id, o.title, o.state, o.business_mode, o.environment,
+                o.target_profit::text AS target_profit,
+                o.capital_approved::text AS capital_approved,
+                o.current_cycle, o.row_version,
+                o.created_at::text AS created_at,
+                v.name AS business_name
+         FROM objectives o
+         LEFT JOIN business_ventures v ON v.id = o.business_venture_id
+         WHERE o.user_id = $1
+         ORDER BY o.created_at DESC LIMIT 50`, [uid]);
+
+      // 2. Snapshot seri (trajectory) — kronologis, dibatasi agar payload wajar
+      const { rows: snapRows } = await client.query(
+        `SELECT s.objective_id, o.title AS objective_title,
+                s.revenue::text AS revenue, s.cogs::text AS cogs,
+                s.gross_profit::text AS gross_profit, s.gross_margin::text AS gross_margin,
+                s.opex::text AS opex, s.operating_profit::text AS operating_profit,
+                s.capital_deployed::text AS capital_deployed,
+                s.capital_remaining::text AS capital_remaining,
+                s.drawdown::text AS drawdown, s.roi::text AS roi,
+                s.created_at::text AS created_at
+         FROM economic_snapshots s
+         JOIN objectives o ON o.id = s.objective_id
+         WHERE o.user_id = $1
+         ORDER BY s.objective_id, s.created_at ASC
+         LIMIT 600`, [uid]);
+
+      // 3. Nilai TERVERIFIKASI: hanya ledger ber-tier RECONCILED (bukti pembayaran)
+      const ver = (await client.query<{ verified_revenue: string; verified_cost: string }>(
+        `SELECT COALESCE(sum(t.amount) FILTER (WHERE t.credit_account='REVENUE'),0)::text AS verified_revenue,
+                COALESCE(sum(t.amount) FILTER (WHERE t.debit_account='COGS'),0)::text AS verified_cost
+         FROM capital_transactions t
+         JOIN objectives o ON o.id = t.objective_id
+         WHERE o.user_id = $1 AND t.verification_tier = 'RECONCILED'`, [uid])).rows[0]
+        ?? { verified_revenue: "0", verified_cost: "0" };
+
+      // 4. Attention queue — hanya eksepsi actionable (§2 Attention Queue)
+      const { rows: pendingApprovals } = await client.query(
+        `SELECT a.id, a.objective_id, a.category, a.status,
+                a.capital_at_risk::text AS capital_at_risk,
+                a.why_required, a.what_will_happen,
+                a.expires_at::text AS expires_at, a.created_at::text AS created_at,
+                o.title AS objective_title
+         FROM approvals a JOIN objectives o ON o.id = a.objective_id
+         WHERE o.user_id = $1 AND a.status = 'PENDING'
+         ORDER BY a.expires_at ASC LIMIT 10`, [uid]);
+
+      const { rows: failedExecs } = await client.query(
+        `SELECT e.id, e.status, m.objective_id, e.finished_at::text AS finished_at,
+                mv.package->>'title' AS mission_title, o.title AS objective_title
+         FROM executions e
+         JOIN missions m ON m.id = e.mission_id
+         JOIN mission_versions mv ON mv.mission_id = m.id AND mv.version = e.mission_version
+         JOIN objectives o ON o.id = m.objective_id
+         WHERE o.user_id = $1 AND e.status IN ('FAILED','TIMED_OUT')
+         ORDER BY e.finished_at DESC NULLS LAST LIMIT 5`, [uid]);
+
+      // 5. Hitungan lifecycle untuk win-rate & antrian
+      const expCounts = (await client.query<{ status: string; count: number }>(
+        `SELECT e.status, count(*)::int AS count FROM experiments e
+         JOIN objectives o ON o.id = e.objective_id WHERE o.user_id = $1
+         GROUP BY e.status`, [uid])).rows;
+      const decCounts = (await client.query<{ decision: string; count: number }>(
+        `SELECT d.decision, count(*)::int AS count FROM decisions d
+         JOIN objectives o ON o.id = d.objective_id WHERE o.user_id = $1
+         GROUP BY d.decision`, [uid])).rows;
+      const missionCounts = (await client.query<{ status: string; count: number }>(
+        `SELECT m.status, count(*)::int AS count FROM missions m
+         JOIN objectives o ON o.id = m.objective_id WHERE o.user_id = $1
+         GROUP BY m.status`, [uid])).rows;
+
+      // 6. Event terbaru (Executive Brief feed)
+      const { rows: events } = await client.query(
+        `SELECT e.id, e.objective_id, e.type AS event_type, e.payload, e.created_at::text AS created_at,
+                o.title AS objective_title
+         FROM events e JOIN objectives o ON o.id = e.objective_id
+         WHERE o.user_id = $1
+         ORDER BY e.created_at DESC LIMIT 12`, [uid]);
+
+      // ── Agregasi deterministik (JS, Decimal-grade via Number pada teks DB —
+      //    nilai sudah final dari Postgres; UI tidak mengubah semantik) ──
+      const num = (v: unknown): number | null => {
+        if (v == null || v === "") return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const latestByObj = new Map<string, Record<string, unknown>>();
+      for (const r of snapRows) latestByObj.set(r.objective_id as string, r);
+      let revenue = 0, cogs = 0, grossProfit = 0, operatingProfit = 0;
+      let deployed = 0, approvedActive = 0;
+      for (const [, s] of latestByObj) {
+        revenue += num(s.revenue) ?? 0;
+        cogs += num(s.cogs) ?? 0;
+        grossProfit += num(s.gross_profit) ?? 0;
+        operatingProfit += num(s.operating_profit) ?? 0;
+        deployed += num(s.capital_deployed) ?? 0;
+      }
+      for (const o of objectives) {
+        const terminal = o.state === "STOPPED" || o.state === "ACHIEVED";
+        if (!terminal) approvedActive += num(o.capital_approved) ?? 0;
+      }
+      const netPortfolio = operatingProfit + cogs; // identitas engine: net = op + cogs
+      const portfolioRoi = approvedActive > 0 ? netPortfolio / approvedActive : null;
+      const grossMargin = revenue > 0 ? grossProfit / revenue : null;
+
+      const countSum = (rowsArr: { count: number }[]): number => rowsArr.reduce((a, r) => a + r.count, 0);
+
+      return {
+        scoreboard: {
+          objectives_total: objectives.length,
+          objectives_active: objectives.filter((o) => !["STOPPED", "ACHIEVED"].includes(o.state as string)).length,
+          revenue, cogs, gross_profit: grossProfit, gross_margin: grossMargin,
+          operating_profit: operatingProfit,
+          capital_approved: approvedActive,
+          capital_deployed: deployed,
+          capital_remaining: Math.max(0, approvedActive - deployed),
+          portfolio_roi: portfolioRoi,
+          verified_revenue: num(ver.verified_revenue) ?? 0,
+          verified_cost: num(ver.verified_cost) ?? 0,
+        },
+        trajectory: snapRows.slice(-120),
+        attention: {
+          pending_approvals: pendingApprovals,
+          blocked_objectives: objectives.filter((o) =>
+            ["BLOCKED", "HUMAN_APPROVAL_REQUIRED"].includes(o.state as string))
+            .map((o) => ({ id: o.id, title: o.title, state: o.state })),
+          failed_executions: failedExecs,
+        },
+        counts: {
+          experiments_by_status: expCounts,
+          experiments_total: countSum(expCounts),
+          decisions_by_type: decCounts,
+          decisions_total: countSum(decCounts),
+          missions_by_status: missionCounts,
+          missions_total: countSum(missionCounts),
+        },
+        events,
+      };
+    }, req),
+  );
+
   // ── GET /approvals?objective_id= (§8 auditor+) ─────────────────────────────
+  // Decision pack lengkap (§11 master prompt): kolom keputusan yang ditulis
+  // engine saat approval dibuat ikut dikembalikan — UI tidak menebak.
   app.get("/approvals", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "auditor");
       const q = req.query as { objective_id?: string };
-      if (!q.objective_id) throw new ApiError(422, "VALIDATION_ERROR", "query objective_id wajib");
       const rows = (await client.query(
-        `SELECT a.id, a.objective_id, a.category, a.status, a.resume_state, a.created_at
+        `SELECT a.id, a.objective_id, a.category, a.status, a.resume_state,
+                a.why_required, a.what_will_happen,
+                a.capital_at_risk::text AS capital_at_risk,
+                a.expected_upside::text AS expected_upside,
+                a.expected_downside::text AS expected_downside,
+                a.payload, a.expires_at, a.decided_by, a.decided_at, a.created_at
          FROM approvals a
          JOIN objectives o ON o.id = a.objective_id
-         WHERE a.objective_id = $1 AND o.user_id = $2
-         ORDER BY a.created_at DESC LIMIT 50`,
-        [q.objective_id, session.userId])).rows;
+         WHERE ($1::uuid IS NULL OR a.objective_id = $1::uuid) AND o.user_id = $2
+         ORDER BY a.created_at DESC LIMIT 100`,
+        [q.objective_id ?? null, session.userId])).rows;
       return { approvals: rows };
     }, req),
   );
@@ -526,8 +739,9 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
         `SELECT er.id, er.verification_tier,
                 er.revenue_claimed::text AS revenue_claimed, er.cost_claimed::text AS cost_claimed,
                 er.payload, er.created_at::text,
-                ex.status AS execution_status, m.id AS mission_id,
-                opp.name AS opportunity_name
+                ex.status AS execution_status, ex.provider, ex.attempt,
+                ex.started_at::text AS started_at, ex.finished_at::text AS finished_at,
+                m.id AS mission_id, opp.name AS opportunity_name
          FROM execution_results er
          JOIN executions ex ON ex.id = er.execution_id
          JOIN missions m ON m.id = ex.mission_id
@@ -539,14 +753,18 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
     }, req),
   );
 
-  // ── GET /objectives/:id/economics — baseline/current/target (§27) ──
+  // ── GET /objectives/:id/economics — P&L lengkap + verified (§14/§27) ──
   app.get<{ Params: { id: string } }>("/objectives/:id/economics", async (req) =>
     withClient(async (client, session) => {
       requireRole(session, "auditor");
       await requireOwnedObjective(client, req.params.id, session);
       const { rows: snap } = await client.query(
-        `SELECT s.revenue::text, s.gross_profit::text, s.operating_profit::text, s.roi::text,
-                s.capital_deployed::text, s.cac::text, s.ltv::text, s.ltv_cac::text, s.created_at::text
+        `SELECT s.revenue::text AS revenue, s.cogs::text AS cogs,
+                s.gross_profit::text AS gross_profit, s.gross_margin::text AS gross_margin,
+                s.opex::text AS opex, s.operating_profit::text AS operating_profit,
+                s.capital_deployed::text AS capital_deployed,
+                s.capital_remaining::text AS capital_remaining,
+                s.drawdown::text AS drawdown, s.roi::text AS roi, s.created_at::text
          FROM economic_snapshots s
          JOIN objectives o ON o.id = s.objective_id
          WHERE s.objective_id = $1 AND o.user_id = $2
@@ -554,12 +772,79 @@ export function registerObjectivesRoutes(app: FastifyInstance, ctx: RouteCtx): v
       const { rows: tgt } = await client.query(
         `SELECT o.target_profit::text AS target_profit, o.capital_approved::text AS capital_approved
          FROM objectives o WHERE o.id = $1 AND o.user_id = $2`, [req.params.id, session.userId]);
+      const ver = (await client.query<{ verified_revenue: string; verified_cost: string }>(
+        `SELECT COALESCE(sum(amount) FILTER (WHERE credit_account='REVENUE'),0)::text AS verified_revenue,
+                COALESCE(sum(amount) FILTER (WHERE debit_account='COGS'),0)::text AS verified_cost
+         FROM capital_transactions
+         WHERE objective_id = $1 AND verification_tier = 'RECONCILED'`, [req.params.id])).rows[0]
+        ?? { verified_revenue: "0", verified_cost: "0" };
       return {
         snapshots: snap,
         target: tgt[0] ?? null,
         baseline: snap[snap.length - 1] ?? null,
         current: snap[0] ?? null,
+        verified: {
+          revenue: ver.verified_revenue,
+          cost: ver.verified_cost,
+        },
       };
+    }, req),
+  );
+
+  // ── GET /ai-economics — akuntabilitas AI §17 (§51: bukti AUREX layak pakai) ──
+  // Semua angka = agregasi tabel model_runs (jejak run model nyata, per-cycle).
+  // cost NULL diisi billing adapter — UI menampilkan "—" bila belum tercatat.
+  app.get("/ai-economics", async (req) =>
+    withClient(async (client, session) => {
+      requireRole(session, "auditor");
+      const { rows } = await client.query(
+        `SELECT mr.agent, mr.purpose,
+                count(*)::int AS runs,
+                count(*) FILTER (WHERE mr.status = 'SUCCEEDED')::int AS succeeded,
+                count(*) FILTER (WHERE mr.status <> 'SUCCEEDED')::int AS failed,
+                COALESCE(sum(mr.input_tokens),0)::text AS input_tokens,
+                COALESCE(sum(mr.output_tokens),0)::text AS output_tokens,
+                CASE WHEN sum(mr.cost) IS NOT NULL THEN sum(mr.cost)::text ELSE NULL END AS cost,
+                COALESCE(round(avg(mr.latency_ms)),0)::int AS avg_latency_ms
+         FROM model_runs mr
+         JOIN cycles c ON c.id = mr.cycle_id
+         JOIN objectives o ON o.id = c.objective_id
+         WHERE o.user_id = $1
+         GROUP BY mr.agent, mr.purpose
+         ORDER BY mr.agent, mr.purpose`, [session.userId]);
+      return { by_agent_purpose: rows };
+    }, req),
+  );
+
+  // ── GET /objectives/:id/forecast — skenario BEAR/BASE/BULL (§15) ──────────
+  // Input = snapshot TERBARU (revenue & operating profit) + capital_remaining.
+  // Kalkulasi deterministik di @aee/economics; keluaran PROJECTED — UI wajib
+  // menampilkannya terpisah dari nilai verified. Snapshot kosong → 409
+  // (data belum ada karena objective belum bergerak, bukan error server).
+  app.get<{ Params: { id: string }; Querystring: { horizon?: string } }>(
+    "/objectives/:id/forecast", async (req) =>
+    withClient(async (client, session) => {
+      const { rows: snap } = await client.query(
+        `SELECT s.revenue::text AS revenue, s.operating_profit::text AS operating_profit,
+                o.capital_approved::text AS capital_approved
+         FROM economic_snapshots s JOIN objectives o ON o.id = s.objective_id
+         WHERE s.objective_id = $1 AND o.user_id = $2
+         ORDER BY s.created_at DESC LIMIT 1`, [req.params.id, session.userId]);
+      const s0 = snap[0];
+      if (!s0) throw new ApiError(409, "STATE_VIOLATION",
+        "forecast belum bisa dihitung — objective belum memiliki snapshot ekonomi");
+      const horizonQ = Number(req.query.horizon ?? "3");
+      const horizon = Number.isFinite(horizonQ) ? Math.trunc(horizonQ) : 3;
+      const deployed = await client.query(
+        `SELECT COALESCE(sum(amount),0)::text AS n FROM capital_transactions
+         WHERE objective_id=$1 AND debit_account='CASH'`, [req.params.id]);
+      const result = buildScenarios({
+        monthlyRevenue: s0.revenue,
+        monthlyOperatingProfit: s0.operating_profit,
+        capitalRemaining: (BigInt(s0.capital_approved ?? "0") - BigInt(deployed.rows[0]?.n ?? "0")).toString(),
+        horizonMonths: horizon,
+      });
+      return result;
     }, req),
   );
 

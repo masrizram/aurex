@@ -24,6 +24,7 @@ import { registerObjectivesRoutes } from "./routes/objectives.js";
 import { registerApprovalRoutes } from "./routes/approvals-webhooks.js";
 import { registerAuthOnboardingRoutes } from "./routes/auth-onboarding.js";
 import { registerBillingAdminRoutes } from "./routes/admin.js";
+import { registerBillingRoutes } from "./routes/billing.js";
 import { registerStaticRoutes } from "./routes/static.js";
 
 export { ApiError, type ApiOptions, type Session } from "./context.js";
@@ -89,6 +90,7 @@ export function buildApp(opts: ApiOptions) {
   registerApprovalRoutes(app, ctx);
   registerAuthOnboardingRoutes(app, ctx);
   registerBillingAdminRoutes(app, ctx);
+  registerBillingRoutes(app, ctx);
   registerStaticRoutes(app, ctx);
 
   return app;
