@@ -15,6 +15,12 @@ import {
   Activity,
   Settings,
   ShieldCheck,
+  Users,
+  Landmark,
+  Zap,
+  FileClock,
+  Wallet,
+  Cpu,
 } from 'lucide-react'
 import { type SidebarData } from '../types'
 
@@ -126,9 +132,21 @@ export const sidebarData: SidebarData = {
       title: 'Internal',
       items: [
         {
-          title: 'Admin',
-          url: '/admin',
+          title: 'Admin Control Center',
           icon: ShieldCheck,
+          items: [
+            { title: 'Overview', url: '/admin', icon: LayoutDashboard },
+            { title: 'Users', url: '/admin/users', icon: Users },
+            { title: 'Organizations', url: '/admin/orgs', icon: Building2 },
+            { title: 'Objectives', url: '/admin/objectives', icon: Target },
+            { title: 'Approvals', url: '/admin/approvals', icon: ClipboardCheck },
+            { title: 'Missions', url: '/admin/missions', icon: Rocket },
+            { title: 'Billing', url: '/admin/billing', icon: Wallet },
+            { title: 'AI Providers', url: '/admin/providers', icon: Cpu },
+            { title: 'Economics', url: '/admin/economics', icon: Landmark },
+            { title: 'System', url: '/admin/system', icon: Zap },
+            { title: 'Audit Log', url: '/admin/audit', icon: FileClock },
+          ],
         },
       ],
     },

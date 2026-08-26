@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
-import { getMe, logout as apiLogout } from "./api";
+import { getMe } from "./api";
 import { SessionContext, type Session } from "./lib/session";
 import { ThemeProvider } from "./context/theme-provider";
 import { FontProvider } from "./context/font-provider";
@@ -8,7 +8,6 @@ import { AuthenticatedLayout } from "./components/layout/authenticated-layout";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthPage } from "./pages/AuthPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
-import { AdminPage } from "./pages/AdminPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { BusinessesPage } from "./pages/BusinessesPage";
 import { BusinessDetailPage } from "./pages/BusinessDetailPage";
@@ -23,6 +22,19 @@ import { ResultsPage } from "./pages/loop/ResultsPage";
 import { EconomicsPage } from "./pages/loop/EconomicsPage";
 import { ActivityPage } from "./pages/loop/ActivityPage";
 import { SettingsPage } from "./pages/SettingsPage";
+// Admin Control Center (internal — guard isAdmin)
+import { AdminLayout } from "./admin/admin-layout";
+import { AdminOverview } from "./admin/modules/overview";
+import { AdminUsers } from "./admin/modules/users";
+import { AdminOrganizations } from "./admin/modules/organizations";
+import { AdminObjectives } from "./admin/modules/objectives";
+import { AdminApprovals } from "./admin/modules/approvals";
+import { AdminMissions } from "./admin/modules/missions";
+import { AdminBilling } from "./admin/modules/billing";
+import { AdminProviders } from "./admin/modules/providers";
+import { AdminEconomics } from "./admin/modules/economics";
+import { AdminSystem } from "./admin/modules/system";
+import { AdminAuditLog } from "./admin/modules/audit";
 
 // ═════════════════════════════════════════════════════════════════
 // AUREX — Customer SaaS Router (shadcn-admin UI system).
@@ -74,13 +86,7 @@ export function App() {
     }
   }, [gate, location.pathname, navigate]);
 
-  const handleLogout = useCallback(async () => {
-    try { await apiLogout(); } catch { /* ignore */ }
-    setSession(null); setGate("auth"); navigate("/auth/login", { replace: true });
-  }, [navigate]);
-
-  if (gate === "loading") {
-    // Skeleton root sesuai pola loading upstream (bukan blank page).
+  if (gate === "loading") {    // Skeleton root sesuai pola loading upstream (bukan blank page).
     return (
       <div className="flex min-h-svh items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-3">
@@ -100,10 +106,6 @@ export function App() {
             <Route path="/auth" element={<Navigate to="/auth/login" replace />} />
             <Route path="/auth/*" element={<AuthPage onAuthed={() => bootstrap()} />} />
             <Route path="/onboarding" element={<OnboardingPage onComplete={() => { setGate("ready"); navigate("/app", { replace: true }); }} />} />
-            <Route path="/admin" element={
-              session?.isAdmin ? <AdminPage onLogout={handleLogout} />
-                : <Navigate to="/app" replace />
-            } />
 
             {/* Customer app — behind shadcn-admin shell */}
             <Route path="/app" element={<AuthenticatedLayout session={session} />}>
@@ -121,6 +123,21 @@ export function App() {
               <Route path="economics" element={<EconomicsPage />} />
               <Route path="activity" element={<ActivityPage />} />
               <Route path="settings" element={<SettingsPage />} />
+            </Route>
+
+            {/* Admin Control Center — internal, guard isAdmin; same shell layout */}
+            <Route path="/admin" element={<AdminLayout session={session} />}>
+              <Route index element={<AdminOverview />} />
+              <Route path="users" element={<AdminUsers />} />
+              <Route path="orgs" element={<AdminOrganizations />} />
+              <Route path="objectives" element={<AdminObjectives />} />
+              <Route path="approvals" element={<AdminApprovals />} />
+              <Route path="missions" element={<AdminMissions />} />
+              <Route path="billing" element={<AdminBilling />} />
+              <Route path="providers" element={<AdminProviders />} />
+              <Route path="economics" element={<AdminEconomics />} />
+              <Route path="system" element={<AdminSystem />} />
+              <Route path="audit" element={<AdminAuditLog />} />
             </Route>
 
             {/* Default — unknown → landing root (landing publik diserve di /) */}
