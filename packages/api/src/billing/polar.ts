@@ -16,6 +16,7 @@
  * Dipakai di routes/billing.ts di belakang BILLING_PROVIDER=polar|duitku.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { PoolClient } from "pg";
 
 export interface PolarConfig {
   /** Org access token (polar.sh dashboard → Settings → Developers → Access tokens). */
@@ -185,4 +186,121 @@ export function polarCfgFromEnv(): PolarConfig | null {
     organizationSlug: slug,
     productIds: productIds as PolarConfig["productIds"], sandbox,
   };
+}
+
+// ── Webhook state mutations (testable, no HTTP) ─────────────────────────────
+// Dipisahkan dari route agar bisa di-unit-test (route Fastify inject TIDAK
+// memicu content-type parser yang mengisi rawBodies — jadi logika murni di sini).
+
+/** Polar subscription.status → subscriptions.status (CHECK constraint). */
+export const SUB_STATUS_MAP: Record<string, "ACTIVE" | "TRIALING" | "PAST_DUE" | "CANCELLED"> = {
+  active: "ACTIVE",
+  trialing: "TRIALING",
+  past_due: "PAST_DUE",
+  canceled: "CANCELLED",
+  revoked: "CANCELLED",
+  pause: "CANCELLED",
+  paused: "CANCELLED",
+  unpaid: "CANCELLED",
+  incomplete: "CANCELLED",
+  incomplete_expired: "CANCELLED",
+};
+
+export interface PolarWebhookEventData {
+  id?: string; url?: string; customer_id?: string; status?: string;
+  current_period_end?: string | null; metadata?: Record<string, string>;
+}
+export interface PolarWebhookEvent {
+  id?: string; type?: string; data?: PolarWebhookEventData;
+}
+
+/** True bila event adalah checkout yang berstatus paid/complete/confirmed. */
+export function isPaidCheckout(evt: PolarWebhookEvent): boolean {
+  if (evt.type !== "checkout.updated" && evt.type !== "checkout.created") return false;
+  const s = (evt.data?.status ?? "").toLowerCase();
+  return s === "paid" || s === "completed" || s === "confirmed";
+}
+
+/**
+ * Apply DB mutations for a verified Polar webhook event (checkout-paid OR
+ * subscription lifecycle). Dipanggil DI DALAM transaksi route (client sudah BEGIN).
+ * Idempotent-by-caller: route sudah pastikan event unik via polar_webhook_events.
+ * Returns a summary for observability; never throws on "no-op" (unknown event).
+ */
+export async function polarWebhookStateMutations(
+  client: PoolClient,
+  evt: PolarWebhookEvent,
+): Promise<{ handled: boolean; kind: "checkout_paid" | "subscription_lifecycle" | "none" }> {
+  const dataStatus = (evt.data?.status ?? "").toLowerCase();
+  const checkoutId = evt.data?.id ?? "";
+  const subId = evt.data?.id ?? "";
+  const customerId = evt.data?.customer_id ?? null;
+  const periodEnd = evt.data?.current_period_end ?? null;
+
+  // A) Checkout paid → invoice PENDING→PAID + activate plan.
+  if (isPaidCheckout(evt)) {
+    const metaOrderId = evt.data?.metadata?.aee_merchant_order_id;
+    if (checkoutId || metaOrderId) {
+      const upd = await client.query<{ organization_id: string; plan_tier: string; period_months: number }>(
+        `UPDATE billing_invoices SET status='PAID', updated_at=now(),
+            polar_checkout_id = COALESCE($2, polar_checkout_id),
+            polar_url = COALESCE($4, polar_url)
+         WHERE (polar_checkout_id = $2 OR merchant_order_id = $3)
+           AND status = 'PENDING'
+         RETURNING organization_id, plan_tier, period_months`,
+        [checkoutId, checkoutId || null, metaOrderId || null, evt.data?.url ?? null]);
+      const inv = upd.rows[0];
+      if (inv) {
+        // activate plan (organizations.plan_tier + subscriptions upsert).
+        const periodEndTmp = new Date();
+        periodEndTmp.setMonth(periodEndTmp.getMonth() + inv.period_months);
+        await client.query(`UPDATE organizations SET plan_tier=$1, updated_at=now() WHERE id=$2`, [inv.plan_tier, inv.organization_id]);
+        const subUp = await client.query(
+          `UPDATE subscriptions SET plan_id=$1, status='ACTIVE', current_period_end=$2,
+              provider='polar', polar_customer_id=COALESCE($4, polar_customer_id),
+              polar_subscription_id=COALESCE($4, polar_subscription_id)
+           WHERE organization_id=$3`,
+          [inv.plan_tier, periodEndTmp.toISOString(), inv.organization_id, customerId]);
+        if ((subUp.rowCount ?? 0) === 0) {
+          await client.query(
+            `INSERT INTO subscriptions (organization_id, plan_id, status, current_period_end, provider, polar_customer_id, polar_subscription_id)
+             VALUES ($1,$2,'ACTIVE',$3,'polar',$4,$4)`,
+            [inv.organization_id, inv.plan_tier, periodEndTmp.toISOString(), customerId]);
+        }
+        return { handled: true, kind: "checkout_paid" };
+      }
+    }
+    return { handled: false, kind: "none" }; // paid event, no matching PENDING invoice
+  }
+
+  // B) Subscription lifecycle: mirror Polar status → subscriptions.status (W7).
+  if (evt.type && evt.type.startsWith("subscription.")) {
+    if (customerId || subId) {
+      const rows = await client.query<{ organization_id: string }>(
+        `SELECT organization_id FROM subscriptions
+         WHERE polar_subscription_id = $1 OR polar_customer_id = $2
+         LIMIT 1`,
+        [subId || null, customerId]);
+      const sub = rows.rows[0];
+      if (sub) {
+        const mapped = SUB_STATUS_MAP[dataStatus] ?? null;
+        if (mapped) {
+          await client.query(
+            `UPDATE subscriptions SET status=$1, updated_at=now(),
+                current_period_end = COALESCE($2::timestamptz, current_period_end)
+             WHERE organization_id = $3`,
+            [mapped, periodEnd, sub.organization_id]);
+          if (mapped === "CANCELLED") {
+            await client.query(
+              `UPDATE organizations SET plan_tier='FREE', updated_at=now() WHERE id=$1`,
+              [sub.organization_id]);
+          }
+          return { handled: true, kind: "subscription_lifecycle" };
+        }
+      }
+    }
+    return { handled: false, kind: "none" };
+  }
+
+  return { handled: false, kind: "none" };
 }
