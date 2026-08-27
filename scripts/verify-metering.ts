@@ -48,20 +48,20 @@ async function main() {
     await client.query("BEGIN");
     const uidRes = await client.query<{ id: string }>(
       `INSERT INTO users (email, password_hash, role) VALUES ('meter@test.local','x','owner') ON CONFLICT (email) DO UPDATE SET password_hash=EXCLUDED.password_hash RETURNING id`);
-    const userId = uidRes.rows[0].id;
+    const userId = uidRes.rows[0]?.id ?? (() => { throw new Error("seeded user row missing"); })();
     const orgRes = await client.query<{ id: string }>(
       `INSERT INTO organizations (name, slug, plan_tier) VALUES ('Meter Org','meter-test','FREE') RETURNING id`);
-    const orgId = orgRes.rows[0].id;
+    const orgId = orgRes.rows[0]?.id ?? (() => { throw new Error("seeded org row missing"); })();
     await client.query(`INSERT INTO memberships (organization_id, user_id, role) VALUES ($1,$2,'OWNER')`, [orgId, userId]);
     const objRes = await client.query<{ id: string }>(
       `INSERT INTO objectives (user_id, organization_id, title, target_profit, capital_approved, horizon_months, deadline, market, risk_tolerance, state, current_cycle, environment)
        VALUES ($1, $2, 'Meter Obj', '2000000.00', '1000000.00', 12, '2030-12-31','ritel','moderate','OBJECTIVE_CREATED',0,'SIMULATED') RETURNING id`,
       [userId, orgId]);
-    const objId = objRes.rows[0].id;
+    const objId = objRes.rows[0]?.id ?? (() => { throw new Error("seeded objective row missing"); })();
     const cycRes = await client.query<{ id: string; cycle_number: number }>(
       `INSERT INTO cycles (objective_id, cycle_number, started_at, status) VALUES ($1, 1, now(), 'ACTIVE') RETURNING id, cycle_number`,
       [objId]);
-    const cycleId = cycRes.rows[0].id;
+    const cycleId = cycRes.rows[0]?.id ?? (() => { throw new Error("seeded cycle row missing"); })();
     await client.query("COMMIT");
     console.log("seeded: org=FREE cycle", cycleId.slice(0, 8), "obj", objId.slice(0, 8));
 

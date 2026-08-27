@@ -16,6 +16,9 @@ import {
   makeDuitkuAdapter, isCallbackSignatureValid, type DuitkuConfig,
   type DuitkuCallbackPayload,
 } from "../billing/duitku.js";
+import {
+  makePolarAdapter, isWebhookSignatureValid, polarCfgFromEnv, type PolarConfig,
+} from "../billing/polar.js";
 
 /** Katalog harga server-side (Rp/bulan). Sumber kebenaran = sini, bukan UI. */
 export const PLAN_PRICES: Record<string, number> = {
@@ -57,6 +60,43 @@ async function activateSubscription(client: PoolClient, orgId: string, planTier:
       `INSERT INTO subscriptions (organization_id, plan_id, status, current_period_end)
        VALUES ($1,$2,'ACTIVE',$3)`, [orgId, planTier, periodEnd.toISOString()]);
   }
+}
+
+/** Setelah pola subscription di atas, aktualisasi kolom provider Polar bila ada.
+ *  Idempoten: hanya UPDATE bila kolom baru ada (objek lama tanpa kolom = safe). */
+async function setSubscriptionProvider(
+  client: PoolClient, orgId: string, planTier: string, polarCustomerId?: string | null,
+): Promise<void> {
+  await client.query(
+    `UPDATE subscriptions
+        SET provider = 'polar',
+            plan_id  = $2,
+            polar_customer_id = $3,
+            polar_subscription_id = $3,
+            status = 'ACTIVE'
+     WHERE organization_id = $1`,
+    [orgId, planTier, polarCustomerId ?? null]);
+  const upd = await client.query(
+    `SELECT 1 FROM subscriptions WHERE organization_id = $1`, [orgId]);
+  if ((upd.rowCount ?? 0) === 0) {
+    await client.query(
+      `INSERT INTO subscriptions (organization_id, plan_id, status, polar_customer_id, polar_subscription_id, provider)
+       VALUES ($1, $2, 'ACTIVE', $3, $3, 'polar')`, [orgId, planTier, polarCustomerId ?? null]);
+  }
+}
+
+/** Pilih provider billing aktif dari env. 'polar' bila terkonfigurasi; else 'duitku'. */
+function resolveProvider(): "polar" | "duitku" {
+  const explicit = process.env.BILLING_PROVIDER;
+  if (explicit === "polar" || explicit === "duitku") return explicit;
+  return polarCfgFromEnv() ? "polar" : "duitku";
+}
+
+function requirePolarConfig(): PolarConfig {
+  const cfg = polarCfgFromEnv();
+  if (!cfg) throw new ApiError(503, "BILLING_UNCONFIGURED",
+    "polar billing belum dikonfigurasi — hubungi admin");
+  return cfg;
 }
 
 export function registerBillingRoutes(app: FastifyInstance, ctx: RouteCtx): void {
@@ -127,6 +167,121 @@ export function registerBillingRoutes(app: FastifyInstance, ctx: RouteCtx): void
       return { order_id: orderId, payment_url: inv.paymentUrl, reference: inv.reference };
     }, req),
   );
+
+  // ── POST /billing/polar/checkout — create hosted checkout (Polar) ────────
+  app.post("/billing/polar/checkout", async (req) =>
+    withClient(async (client, session) => {
+      const cfg = requirePolarConfig();
+      const body = parseBody(CheckoutSchema, req.body);
+      if (!PLAN_PRICES[body.plan_tier]) throw new ApiError(422, "VALIDATION_ERROR", "plan tidak dikenal");
+      const org = await getOrgForUser(client, session.userId);
+      if (!org) throw new ApiError(404, "NOT_FOUND", "organization tidak ditemukan");
+
+      const amount = PLAN_PRICES[body.plan_tier]! * body.period_months!;
+      const discount = body.period_months === 3 ? 0.95 : body.period_months === 12 ? 0.85 : 1;
+      const finalAmount = Math.round(amount * discount);
+      const orderId = `AEE-${org.id.slice(0, 8)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const { rows: userRows } = await client.query<{ email: string; name: string }>(
+        `SELECT email, COALESCE(name,'') AS name FROM users WHERE id = $1`, [session.userId]);
+
+      const adapter = makePolarAdapter(cfg);
+      const appUrl = process.env.AEE_APP_URL ?? "http://localhost:5173";
+      const co = await adapter.createCheckout({
+        planTier: body.plan_tier,
+        periodMonths: body.period_months ?? 1,
+        amount: finalAmount,
+        merchantOrderId: orderId,
+        productDetails: `AUREX ${body.plan_tier} ${body.period_months} bulan`,
+        email: userRows[0]?.email ?? "billing@aurex.id",
+        customerName: userRows[0]?.name || "Pelanggan AUREX",
+        successUrl: `${appUrl}/app/settings?billing=return`,
+        customerExternalId: org.id,
+      });
+
+      await client.query(
+        `INSERT INTO billing_invoices
+           (organization_id, user_id, plan_tier, period_months, amount,
+            merchant_order_id, status, payment_url, polar_checkout_id, polar_customer_id, provider)
+         VALUES ($1,$2,$3,$4,$5,$6,'PENDING',$7,$8,$9,'polar')`,
+        [org.id, session.userId, body.plan_tier, body.period_months,
+          finalAmount.toFixed(2), orderId, co.checkoutUrl, co.checkoutId, co.polarCustomerId]);
+
+      return { order_id: orderId, payment_url: co.checkoutUrl, reference: co.checkoutId };
+    }, req),
+  );
+
+  // ── POST /billing/polar/webhook — Polar webhook (HMAC-SHA256 verified) ────
+  const registerPolarWebhook = (app2: FastifyInstance) => {
+    app2.post("/billing/polar/webhook", async (req, reply) => {
+      const cfg = requirePolarConfig();
+      const raw = ctx.rawBodies.get(req) ?? JSON.stringify(req.body);
+      if (typeof raw !== "string" || raw.length === 0) {
+        throw new ApiError(400, "VALIDATION_ERROR", "webhook kosong");
+      }
+      const sigHeader = String(req.headers["webhook-signature"] ?? "");
+      if (!isWebhookSignatureValid(raw, sigHeader, cfg.webhookSecret)) {
+        throw new ApiError(403, "FORBIDDEN", "webhook signature tidak valid");
+      }
+      let evt: { id?: string; type?: string; data?: {
+        id?: string; url?: string; customer_id?: string; status?: string; metadata?: Record<string, string>;
+      } };
+      try { evt = JSON.parse(raw) as typeof evt; }
+      catch { throw new ApiError(400, "VALIDATION_ERROR", "webhook bukan JSON valid"); }
+      if (!evt.id || !evt.type) throw new ApiError(400, "VALIDATION_ERROR", "webhook tanpa id/type");
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        // Idempotency: record event ONCE. If already processed → 200 (no rework).
+        const ins = await client.query(
+          `INSERT INTO polar_webhook_events (event_id, event_type, payload, signature_valid)
+           VALUES ($1,$2,$3::jsonb,true)
+           ON CONFLICT (event_id) DO NOTHING RETURNING id`, [evt.id, evt.type, raw]);
+        if ((ins.rowCount ?? 0) === 0) {
+          await client.query("COMMIT");
+          return reply.status(200).send({ received: true, dedup: true });
+        }
+        // Process PAID checkout → flip invoice PENDING→PAID + activate plan.
+        // Only `checkout.updated` (or created) with status paid/complete applies.
+        const isPaid = evt.type === "checkout.updated" || evt.type === "checkout.created";
+        const dataStatus = evt.data?.status?.toLowerCase() ?? "";
+        const paid = isPaid && (dataStatus === "paid" || dataStatus === "completed" || dataStatus === "confirmed");
+        const checkoutId = evt.data?.id ?? "";
+        // Resolve invoice by our merchant_order_id stored in metadata (or checkout id).
+        const metaOrderId = evt.data?.metadata?.aee_merchant_order_id;
+        const upd = paid && (checkoutId || metaOrderId)
+          ? await client.query<{ organization_id: string; plan_tier: string; period_months: number }>(
+              `UPDATE billing_invoices SET status='PAID', updated_at=now(),
+                  polar_checkout_id = COALESCE($2, polar_checkout_id),
+                  polar_url = COALESCE($4, polar_url)
+               WHERE (polar_checkout_id = $2 OR merchant_order_id = $3)
+                 AND status = 'PENDING'
+               RETURNING organization_id, plan_tier, period_months`,
+              [checkoutId, checkoutId || null, metaOrderId || null, evt.data?.url ?? null])
+          : { rows: [] };
+        const inv = upd.rows[0];
+        if (inv) {
+          await activateSubscription(client, inv.organization_id, inv.plan_tier, inv.period_months);
+          await setSubscriptionProvider(client, inv.organization_id, inv.plan_tier, evt.data?.customer_id ?? null);
+        }
+        await client.query(
+          `UPDATE polar_webhook_events SET processed_at = now(), processing_error = NULL
+           WHERE event_id = $1`, [evt.id]);
+        await client.query("COMMIT");
+        return reply.status(200).send({ received: true });
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        // Mark processed with error so a 500 to Polar triggers their retry.
+        await client.query(
+          `UPDATE polar_webhook_events SET processing_error = $2
+           WHERE event_id = $1`, [evt.id, String((err as Error)?.message ?? err)]).catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    });
+  };
+  registerPolarWebhook(app);
 
   app.post("/billing/duitku/callback", async (req, reply) => {
     const cfg = requireBillingConfig();

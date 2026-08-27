@@ -5,6 +5,7 @@
  * source of truth host/port. Tanpa hardcode localhost/IP WSL.
  */
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { poolConfigFor } from "./neon.js";
 
 export interface ResilientPoolConfig {
   readonly url: string;
@@ -80,7 +81,7 @@ export class ResilientPool {
     this.label = cfg.label ?? "db";
     this.log = cfg.onEvent ?? (() => {});
     const pc: PoolConfig = {
-      connectionString: cfg.url,
+      ...poolConfigFor(cfg.url),
       max: cfg.max ?? 8,
       idleTimeoutMillis: cfg.idleTimeoutMillis ?? 30_000,
       connectionTimeoutMillis: cfg.connectionTimeoutMillis ?? 5_000,

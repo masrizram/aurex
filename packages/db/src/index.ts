@@ -7,10 +7,13 @@ import { Pool } from "pg";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { poolConfigFor } from "./neon.js";
 
 export { Pool };
 
 export { ResilientPool, isTransientDbError, type ResilientPoolConfig, type DbHealthState } from "./resilient.js";
+
+export { isNeonUrl, neonNormalize, poolConfigFor } from "./neon.js";
 
 // ── Kredensial DB dev/scratch (§24 secret safety) ────────────────────────────
 // Password kontainer Postgres dev TIDAK PERNAH ditulis literal di source.
@@ -33,11 +36,11 @@ export function devDbUrl(user: string, host: string, port: string | number, data
 }
 
 export function ownerPool(url: string): Pool {
-  return new Pool({ connectionString: url, max: 4 });
+  return new Pool(poolConfigFor(url, { max: 4 }));
 }
 
 export function appPool(url: string): Pool {
-  return new Pool({ connectionString: url, max: 8 });
+  return new Pool(poolConfigFor(url, { max: 8 }));
 }
 
 // ── Migrasi ──────────────────────────────────────────────────────────────────

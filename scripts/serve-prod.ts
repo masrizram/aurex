@@ -5,6 +5,7 @@
  */
 import "dotenv/config";
 import { Pool } from "pg";
+import { ownerPool, appPool, neonNormalize, poolConfigFor } from "@aee/db";
 import { buildApp } from "@aee/api";
 import { createAgents } from "@aee/agents";
 import { PgBossQueue } from "@aee/orchestrator/runtime";
@@ -36,7 +37,7 @@ if (!WEBHOOK_SECRET || WEBHOOK_SECRET === "whsec-change-me" || WEBHOOK_SECRET.le
 
 // ── Wait for DB to be ready ─────────────────────────────────────────────────
 async function waitForDb(url: string, maxAttempts = 30): Promise<void> {
-  const pool = new Pool({ connectionString: url, max: 1, connectionTimeoutMillis: 5000 });
+  const pool = new Pool(poolConfigFor(url, { max: 1, connectionTimeoutMillis: 5000 }));
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await pool.query("SELECT 1");
@@ -68,9 +69,11 @@ await new Promise<void>((resolve) => {
 });
 
 // ── Pools + Queue ──────────────────────────────────────────────────────────
-const apiPool = new Pool({ connectionString: APP_URL, max: 8 });
+// Neon-aware: ownerPool/appPool apply sslmode=require + SSL automatically for
+// neon.tech hosts; neonNormalize ensures pg-boss connection string has SSL too.
+const apiPool = ownerPool(APP_URL);
 apiPool.on("error", (err) => console.error("[apiPool] error (diabaikan):", err.message));
-const boss = new pgBossCtor({ connectionString: ADMIN_URL }) as never;
+const boss = new pgBossCtor({ connectionString: neonNormalize(ADMIN_URL) }) as never;
 const queue = new PgBossQueue(boss as never);
 
 // ── Agents ──────────────────────────────────────────────────────────────────

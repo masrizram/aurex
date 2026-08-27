@@ -13,6 +13,7 @@
  * di packages/agents — sesi Kimi).
  */
 import { Pool } from "pg";
+import { poolConfigFor } from "@aee/db";
 import pgBossCtor from "pg-boss";
 import {
   InMemoryQueue, PgBossQueue, QUEUE_ADVANCE, runAgentJob,
@@ -78,7 +79,7 @@ export async function startWorker(opts: WorkerOptions): Promise<WorkerHandle> {
     queue: new PgBossQueue(boss as unknown as ConstructorParameters<typeof PgBossQueue>[0]),
   };
 
-  const appPool = new Pool({ connectionString: opts.appUrl, max: 2 });
+  const appPool = new Pool(poolConfigFor(opts.appUrl, { max: 2 }));
   // Koneksi idle yang dibunuh admin/pg-boss maintenance tidak boleh crash proses.
   appPool.on("error", (err) => log(`pool error (diabaikan): ${String(err.message).slice(0, 120)}`));
 
