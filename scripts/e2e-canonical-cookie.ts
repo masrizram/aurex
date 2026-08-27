@@ -60,13 +60,13 @@ async function j<T = any>(path: string, opts: RequestInit = {}): Promise<{ statu
 
   // ── ONBOARDING: Organization → Business → Baseline → Goal → ExecPref ──
   const s1 = await j("/onboarding/step1", { method: "POST", body: JSON.stringify({ business_name: "Kopi E2E", industry: "F&B", target_customer: "Pekerja kantoran" }) });
-  ok("ONBOARDING Business (venture)", s1.status === 200 && !!s1.body?.venture_id, JSON.stringify(s1.body).slice(0, 120));
-  const s3 = await j("/onboarding/step3", { method: "POST", body: JSON.stringify({ current_revenue: "10000000", current_cost: "7000000", capital: "2000000", time_horizon_months: 6 }) });
-  ok("ONBOARDING Economic Baseline", s3.status === 200);
+  ok("ONBOARDING Business (venture)", s1.status === 200 && !!s1.body?.venture_id, JSON.stringify(s1.body).slice(0, 160));
   const s2 = await j("/onboarding/step2", { method: "POST", body: JSON.stringify({ goal_type: "increase_profit" }) });
-  ok("ONBOARDING Goal", s2.status === 200);
+  ok("ONBOARDING Goal", s2.status === 200, `got ${s2.status}`);
+  const s3 = await j("/onboarding/step3", { method: "POST", body: JSON.stringify({ current_revenue: "10000000", current_cost: "7000000", capital: "2000000", time_horizon_months: 6 }) });
+  ok("ONBOARDING Economic Baseline", s3.status === 200, `got ${s3.status} — ${JSON.stringify(s3.body).slice(0, 120)}`);
   const s4 = await j("/onboarding/step4", { method: "POST", body: JSON.stringify({ autonomy_level: 2 }) });
-  ok("ONBOARDING Execution Preference = Approval Required (2)", s4.status === 200);
+  ok("ONBOARDING Execution Preference = Approval Required (2)", s4.status === 200, `got ${s4.status}`);
   const s5 = await j("/onboarding/step5", { method: "POST", body: JSON.stringify({ title: "Increase profit Kopi E2E", target_profit: "20000000" }) });
   ok("FIRST ANALYSIS (objective created + research started)", s5.status === 200 && !!s5.body?.objective_id, JSON.stringify(s5.body).slice(0, 160));
   const objId = s5.body?.objective_id as string;
