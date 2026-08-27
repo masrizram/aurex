@@ -6,6 +6,23 @@
 import "dotenv/config";
 import { Pool } from "pg";
 import { ownerPool } from "../packages/db/src/index.js";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+/** Parse expected business tables from migration SQL: distinct CREATE TABLE names,
+ *  excluding schema_migrations. Re-derived on every run so adding a migration
+ *  never silently stale-checks the count. */
+function collectExpectedTables(migrations: string[]): string[] {
+  const tables = new Set<string>();
+  for (const name of migrations) {
+    const sql = readFileSync(resolve(import.meta.dirname ?? ".", "../migrations", name), "utf8");
+    for (const m of sql.matchAll(/CREATE TABLE (?:IF NOT EXISTS\s+)?(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/gi)) {
+      const t = m[1]?.toLowerCase();
+      if (t && t !== "schema_migrations") tables.add(t);
+    }
+  }
+  return [...tables].sort();
+}
 
 interface StepResult { step: string; ok: boolean; detail: string }
 
@@ -20,31 +37,24 @@ async function main(): Promise<void> {
   if (!url) throw new Error("DATABASE_URL tidak di-set");
   const owner = ownerPool(url);
 
-  // S1: katalog pasca-migrasi (12 migrasi: core+grants+venture+tenancy+auth
-  // +onboarding_fixes+goal_type+auth_lifecycle+capital_zero+billing
-  // +admin_ai_providers+admin_audit_detail = 35 tabel)
+  // S0: derive expected migration set + expected business tables from the REPO
+  // (not hardcoded) — so adding a migration never silently breaks this harness.
+  const migDir = resolve(import.meta.dirname ?? ".", "../migrations");
+  const EXPECTED_MIGRATIONS = readdirSync(migDir).filter((f) => f.endsWith(".sql")).sort();
+  const EXPECTED_TABLES = collectExpectedTables(EXPECTED_MIGRATIONS);
+  record("S0_derived_expected", EXPECTED_MIGRATIONS.length > 0 && EXPECTED_TABLES.length > 0,
+    `derived ${EXPECTED_MIGRATIONS.length} migrations, ${EXPECTED_TABLES.length} tables from repo`);
+
+  // S1: katalog pasca-migrasi (dari repo-derived set, bukan hardcode)
   const cat = await owner.query<{ n: string }>(`
     SELECT count(*)::text AS n FROM pg_tables
     WHERE schemaname='public' AND tablename NOT IN ('schema_migrations')`);
-  record("S1_table_count", cat.rows[0]?.n === "35", `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi 35`);
+  record("S1_table_count", cat.rows[0]?.n === String(EXPECTED_TABLES.length),
+    `tabel (tanpa schema_migrations) = ${cat.rows[0]?.n}, ekspektasi ${EXPECTED_TABLES.length}`);
 
-  // S2: migration tercatat (12 file: 001..012)
+  // S2: migration tercatat (repo-derived list, sorted — harus presisi)
   const mig = await owner.query<{ name: string; sha256: string }>(
     "SELECT name, sha256 FROM schema_migrations ORDER BY name");
-  const EXPECTED_MIGRATIONS = [
-    "001_core_schema.sql",
-    "002_orchestrator_grants.sql",
-    "003_business_venture.sql",
-    "004_multi_tenancy.sql",
-    "005_auth_onboarding.sql",
-    "006_onboarding_fixes.sql",
-    "007_objective_goal_type.sql",
-    "008_auth_lifecycle.sql",
-    "009_objectives_capital_zero.sql",
-    "010_billing_duitku.sql",
-    "011_admin_ai_providers.sql",
-    "012_admin_audit_detail.sql",
-  ];
   const migOk =
     mig.rowCount === EXPECTED_MIGRATIONS.length &&
     EXPECTED_MIGRATIONS.every((name, i) => mig.rows[i]?.name === name);
