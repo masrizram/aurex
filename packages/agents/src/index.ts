@@ -476,23 +476,134 @@ export function providerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Pro
       model: env.GLM_MODEL ?? "glm-4.6",
       promptVersion: env.GLM_PROMPT_VERSION ?? "1",
     },
-    forceMock: Boolean(env.AEE_FORCE_MOCK),
+    forceMock: env.AEE_FORCE_MOCK === "1" || String(env.AEE_FORCE_MOCK ?? "").toLowerCase() === "true",
   };
 }
 
-/** Semantik badge admin `/agent-mode`: provider REAL jika key terpasang (display saja). */
-export function providerModeFromEnv(env: NodeJS.ProcessEnv = process.env) {
-  const kimi = env.KIMI_API_KEY ? ("REAL" as const) : ("MOCK" as const);
-  const glm = env.GLM_API_KEY ? ("REAL" as const) : ("MOCK" as const);
+/**
+ * Badge status admin `/agent-mode`.
+ *
+ * Jujur terhadap APA YANG AKAN DILAKUKAN createAgents() — bukan hanya "apakah ada
+ * API key". `mode` = REAL HANYA jika dua-duanya terkonfigurasi lengkap DAN
+ * `forceMock=false` DAN baseUrl bukan localhost. Jika `AEE_FORCE_MOCK=true`,
+ * mode tidak mungkin REAL meski key terpasang (ini yang dulu menyesatkan operator).
+ *
+ * `providers[]` menyertakan status reachability dari health-cache terakhir
+ * (di-update oleh recordProviderHealth saat adapter benar-benar dipanggil).
+ * `lastError` / `lastCheckAt` memungkinkan UI menunjukkan DEGRADED, bukan sekadar
+ * "REAL/MOCK".
+ */
+export interface ProviderModeHealth {
+  readonly reachable: boolean;
+  readonly lastCheckAt: string | null;
+  readonly lastError: string | null;
+}
+
+// Health-cache proses: di-update oleh recordProviderHealth (dipanggil adapter saat
+// request nyata). Tidak persisten — cukup untuk badge real-time + uji.
+const providerHealth = new Map<string, ProviderModeHealth>();
+
+export function recordProviderHealth(
+  name: "kimi" | "glm",
+  reachable: boolean,
+  lastError: string | null = null,
+): void {
+  providerHealth.set(name, {
+    reachable,
+    lastCheckAt: new Date().toISOString(),
+    lastError,
+  });
+}
+
+/** Hanya untuk test: reset health-cache agar antar-test tidak saling bocor. */
+export function _resetProviderHealth(): void {
+  providerHealth.clear();
+}
+
+/** Resolve host untuk badge; null bila URL kosong/rusak. */
+function baseUrlHost(url: string): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.hostname;
+  } catch {
+    return null;
+  }
+}
+
+/** True bila URL aman untuk provider nyata (bukan localhost/127.0.0.1/loopback). */
+function isReachableBaseUrl(url: string): boolean {
+  if (!url) return false;
+  let host: string;
+  try { host = new URL(url).hostname; } catch { return false; }
+  if (!host) return false;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return false;
+  return true;
+}
+
+export type ProviderModeInfo = {
+  mode: "REAL" | "MOCK" | "MIXED" | "DEGRADED";
+  forceMock: boolean;
+  providers: Array<{
+    name: "kimi" | "glm";
+    configured: boolean;
+    baseUrl: string | null;
+    baseUrlHost: string | null;
+    reachable: boolean | null;
+    lastCheckAt: string | null;
+    lastError: string | null;
+  }>;
+  lastCheckAt: string | null;
+  // back-compat fields dulu
+  kimi: { mode: "REAL" | "MOCK" | "MIXED" | "DEGRADED"; model: string };
+  glm: { mode: "REAL" | "MOCK" | "MIXED" | "DEGRADED"; model: string };
+};
+
+export function providerModeFromEnv(env: NodeJS.ProcessEnv = process.env): ProviderModeInfo {
+  const pc = providerConfigFromEnv(env);
+  const forceMock = pc.forceMock;
+
+  const provider = (name: "kimi" | "glm") => {
+    const c = pc[name];
+    const host = baseUrlHost(c.baseUrl);
+    const configured = Boolean(c.apiKey && host && isReachableBaseUrl(c.baseUrl));
+    const health = providerHealth.get(name);
+    // reachable: null = belum pernah dicek; true/false = hasil probe terakhir.
+    const reachable = health ? health.reachable : null;
+    const mode: ProviderModeInfo["kimi"]["mode"] =
+      !configured ? "MOCK"
+      : forceMock ? "MOCK"
+      : health && !health.reachable ? "DEGRADED"
+      : "REAL";
+    return {
+      name,
+      configured,
+      baseUrl: c.baseUrl,
+      baseUrlHost: host,
+      reachable,
+      lastCheckAt: health?.lastCheckAt ?? null,
+      lastError: health?.lastError ?? null,
+      mode,
+      model: c.model,
+    };
+  };
+
+  const kimi = provider("kimi");
+  const glm = provider("glm");
+
+  const overallMode: ProviderModeInfo["mode"] =
+    kimi.mode === "REAL" && glm.mode === "REAL" ? "REAL"
+    : kimi.mode === "MOCK" && glm.mode === "MOCK" ? "MOCK"
+    : (kimi.mode === "DEGRADED" || glm.mode === "DEGRADED") ? "DEGRADED"
+    : "MIXED";
+
   return {
-    mode:
-      kimi === "REAL" && glm === "REAL"
-        ? ("REAL" as const)
-        : kimi === "REAL" || glm === "REAL"
-          ? ("MIXED" as const)
-          : ("MOCK" as const),
-    kimi: { mode: kimi, model: env.KIMI_MODEL ?? "mock" },
-    glm: { mode: glm, model: env.GLM_MODEL ?? "mock" },
+    mode: overallMode,
+    forceMock,
+    providers: [kimi, glm].map(({ mode, model, ...rest }) => rest),
+    lastCheckAt: [kimi.lastCheckAt, glm.lastCheckAt].find((x) => x) ?? null,
+    kimi: { mode: kimi.mode, model: kimi.model },
+    glm: { mode: glm.mode, model: glm.model },
   };
 }
 
@@ -525,10 +636,15 @@ export class KimiAdapter implements StrategicAgentProvider {
         sleeper: this.sleeper, clock: this.clock, allowRepair: true, postValidate,
       });
       this.runs.push(run);
+      recordProviderHealth("kimi", true);
       return value;
     } catch (e) {
       // F14: catat run FAILED/REJECTED sebelum re-throw.
       if (e instanceof AgentRunError) { this.runs.push(e.run); }
+      // Kesehatan provider: transport/network/HTTP failure → degraded (badge jujur).
+      const isTransport = e instanceof AgentTransientError || e instanceof AgentFatalError
+        || /fetch|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|HTTP/i.test(String((e as Error)?.message ?? e));
+      if (isTransport) recordProviderHealth("kimi", false, String((e as Error)?.message ?? e));
       throw e;
     }
   }
@@ -618,12 +734,16 @@ export class GlmAdapter implements ExecutionAgentProvider {
         },
       });
       this.runs.push(run);
+      recordProviderHealth("glm", true);
       const handle: ExecutionHandle = { ref: `glm:${run.outputHash?.slice(0, 16) ?? randomUUID()}`, result: value };
       this.handles.set(handle.ref, handle);
       return handle;
     } catch (e) {
       // F14: catat run FAILED/REJECTED sebelum re-throw.
       if (e instanceof AgentRunError) { this.runs.push(e.run); }
+      const isTransport = e instanceof AgentTransientError || e instanceof AgentFatalError
+        || /fetch|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|HTTP/i.test(String((e as Error)?.message ?? e));
+      if (isTransport) recordProviderHealth("glm", false, String((e as Error)?.message ?? e));
       throw e;
     }
   }

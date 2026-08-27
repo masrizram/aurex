@@ -5,7 +5,7 @@
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { CreateVentureRequestSchema } from "@aee/contracts";
-import { providerModeFromEnv } from "@aee/agents";
+import { providerModeFromEnv, providerConfigFromEnv, recordProviderHealth } from "@aee/agents";
 import { ApiError, type RouteCtx } from "../context.js";
 
 /** Daftarkan rute inti (health / ventures / agent-mode). */
@@ -57,6 +57,43 @@ export function registerCoreRoutes(app: FastifyInstance, ctx: RouteCtx): void {
     withClient(async (_client, session) => {
       if (!session.isAdmin) throw new ApiError(403, "FORBIDDEN", "admin only");
       return providerModeFromEnv();
+    }, req),
+  );
+
+  // ── Admin probe: uji reachability provider LLM dari mesin ini ────────────────
+  // Sebelum AEE_FORCE_MOCK=false di prod, WAJIB buktikan kedua endpoint reachable
+  // dari SETIAP Fly machine. Endpoint ini melakukan satu panggilan nyata (1 token)
+  // ke tiap provider, mencatat hasil ke health-cache, lalu mengembalikan status.
+  app.post("/agent-mode/probe", async (req) =>
+    withClient(async (_client, session) => {
+      if (!session.isAdmin) throw new ApiError(403, "FORBIDDEN", "admin only");
+      const pc = providerConfigFromEnv();
+      const results: Record<string, unknown> = {};
+
+      const probe = async (name: "kimi" | "glm", baseUrl: string, apiKey: string, model: string) => {
+        if (!apiKey) {
+          recordProviderHealth(name, false, "api key kosong");
+          results[name] = { ok: false, error: "api key kosong" };
+          return;
+        }
+        try {
+          const res = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: "ping" }], max_tokens: 1 }),
+          });
+          const ok = res.ok;
+          recordProviderHealth(name, ok, ok ? null : `HTTP ${res.status}`);
+          results[name] = { ok, status: res.status };
+        } catch (e) {
+          recordProviderHealth(name, false, String((e as Error)?.message ?? e));
+          results[name] = { ok: false, error: String((e as Error)?.message ?? e) };
+        }
+      };
+
+      await probe("kimi", pc.kimi.baseUrl, pc.kimi.apiKey, pc.kimi.model);
+      await probe("glm", pc.glm.baseUrl, pc.glm.apiKey, pc.glm.model);
+      return { probedAt: new Date().toISOString(), results, mode: providerModeFromEnv().mode };
     }, req),
   );
 }
