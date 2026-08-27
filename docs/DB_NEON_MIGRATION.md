@@ -1,133 +1,223 @@
-# AUREX (AEE) — Database Migration: Fly Postgres → Neon
+# AUREX — Neon Production Database Provisioning & Cutover
 
-> **Status: REPO-SIDE COMPLETE · EXTERNAL CONFIG PENDING (dashboard access required).**
-> The code changes to support Neon are done and verified (typecheck + tests green).
-> The external dashboard steps below CANNOT be executed from this session (no Neon
-> credentials/project access was provided). Each step is written so a human or a
-> properly-credentialed agent can complete the switch with zero code changes.
+> **Source-derived environment variables. No values invented.**
+> This runbook supersedes any earlier draft. Every variable name was verified against
+> the actual implementation (`packages/db/src/neon.ts`, `scripts/serve-prod.ts`,
+> `apps/worker/src/index.ts`, `Dockerfile`, `fly.toml`, `.env.example`) on commit `7d03c6d`.
 
 ---
 
-## 1. Why Neon
+## 0. Prerequisite reality check (verified 2026-08-27)
 
-| | Fly Postgres (current) | Neon |
-|---|---|---|
-| Serverless | No — single VM, self-managed | Yes — autoscaling endpoints, built-in PITR |
-| Cold start | n/a (always-on VM) | ~500ms wake (suspended endpoints) |
-| Branching | Manual | Built-in ephemeral branches (dev/preview) |
-| Connections | Single primary | Pooled via pgbouncer (5432 "pooler" host) |
-| Cost | Full VM always on | Autosuspend → near-zero idle |
+Before provisioning, **honestly confirm** you have:
 
-The app is already **dual-URL** (`DATABASE_URL` owner + `DATABASE_APP_URL` app role),
-which maps directly to Neon's multi-role model. This is why the migration is a
-config-only switch on the repo side.
+- [ ] `neonctl` installed (`brew install neonctl` or download) **OR** browser access to `console.neon.tech`
+- [ ] Neon API key (`NEON_API_KEY`) for CLI, **OR** a Neon account with project-create permission
+- [ ] A region in the **same continent as Fly region `sin`** (Singapore). The AEE Fly app is in `sin` — choose Neon **AWS Singapore (`ap-southeast-1`)** for the lowest cross-region latency.
+- [ ] A **second Neon role** (non-owner) for the application runtime — matching the dual-URL contract.
 
-## 2. Repo changes already shipped (this PR)
+If any item is missing, **STOP**. Do not attempt provisioning with guessed credentials.
 
-| File | Change |
-|---|---|
-| `packages/db/src/neon.ts` | `isNeonUrl`, `neonNormalize` (injects `sslmode=require`), `poolConfigFor` (auto-enables SSL for neon.tech hosts) |
-| `packages/db/src/index.ts` | `ownerPool`/`appPool` routed through `poolConfigFor`; exports the Neon helpers |
-| `packages/db/src/resilient.ts` | `ResilientPool` now Honor Neon SSL config |
-| `apps/worker/src/index.ts` | worker appPool routed through `poolConfigFor` |
-| `scripts/serve-prod.ts` | API pool → `ownerPool`; pg-boss → `neonNormalize(ADMIN_URL)`; `waitForDb` → `poolConfigFor` |
-| `packages/db/test/neon.test.ts` | 7 unit tests covering detection, sslmode injection, scheme prepend, PoolConfig SSL, non-Neon passthrough |
+---
 
-## 3. What the code now does automatically
+## 1. Source-derived environment variable matrix (no invention)
 
-- If `DATABASE_URL`/`DATABASE_APP_URL` host contains `neon.tech` or `neon.run`, every
-  pool auto-applies `ssl: { rejectUnauthorized: true }` and appends `sslmode=require`.
-- The migration runner already uses `ownerPool` (now Neon-aware).
-- pg-boss connection string is `neonNormalize`d at the entrypoint.
-- Non-Neon hosts (local dev, Fly Postgres) are untouched — the migration is
-  **reversible** by simply pointing the env back.
+All variable names below were read from source. The "Used by" column tells you which
+file fails closed if the variable is missing or wrong.
 
-## 4. External config — DO THIS ON THE NEON CONSOLE (requires org owner)
+| Variable | Purpose | Required? | Used by | Secret? | Source line |
+|---|---|---|---|---|---|
+| `DATABASE_URL` | Owner connection for **migrations + pg-boss + worker** | Yes (prod) | `serve-prod.ts` (ownerPool, pg-boss, waitForDb); `worker` | **Yes** | `packages/db/src/index.ts` (ownerPool) |
+| `DATABASE_APP_URL` | Least-privilege runtime connection (`aee_app`-style role) | Yes (prod, dual-role) | `serve-prod.ts` (appPool) | **Yes** | `packages/db/src/index.ts` (appPool) |
+| `AEE_DEV_DB_PASSWORD` | Dev container Postgres password | **No** in prod (Fly uses machine-injected creds) | local dev tools | Yes | `packages/db/src/dev-password.ts` |
+| `BILLING_PROVIDER` | `"polar"` \| `"duitku"` \| unset (auto) | Optional | `routes/billing.ts` `resolveProvider()` | No | `routes/billing.ts:89-93` |
+| `POLAR_ACCESS_TOKEN` | Polar org access token (`pol_…`) | Required if `BILLING_PROVIDER=polar` | `routes/billing.ts`, `billing/polar.ts` | **Yes** | `polar.ts:171` |
+| `POLAR_WEBHOOK_SECRET` | Polar webhook HMAC secret (`whsec_…`) | Required if Polar enabled | `polar.ts:172` (constant-time verify) | **Yes** | `polar.ts:82-98` |
+| `POLAR_ORGANIZATION_SLUG` | Polar org slug (e.g. `aurex`) | Required if Polar enabled | `polar.ts:173` | No | `polar.ts:173` |
+| `POLAR_PRODUCT_STARTER` | Polar product id for `STARTER` plan (Rp 499.000/bln) | Required if Polar enabled | `polar.ts:176`, `routes/billing.ts` `PLAN_PRICES.STARTER` | No | `polar.ts:176` |
+| `POLAR_PRODUCT_GROWTH` | Polar product id for `GROWTH` plan (Rp 2.500.000/bln) | Required | `polar.ts:177`, `PLAN_PRICES.GROWTH` | No | `polar.ts:177` |
+| `POLAR_PRODUCT_ENTERPRISE` | Polar product id for `ENTERPRISE` plan (Rp 100.000.000/bln) | Required | `polar.ts:178`, `PLAN_PRICES.ENTERPRISE` | No | `polar.ts:178` |
+| `POLAR_SANDBOX` | `true` → `X-Polar-Sandbox: true` header. **Default `true`.** | **Required `false` for prod** | `polar.ts:174, 141` | No | `polar.ts:174` |
+| `DUITKU_MERCHANT_CODE` | Duitku merchant code | Required if `BILLING_PROVIDER=duitku` | `routes/billing.ts:36` | **Yes** | legacy Duitku adapter |
+| `DUITKU_API_KEY` | Duitku API key | Required if Duitku | `routes/billing.ts:37` | **Yes** | legacy Duitku adapter |
+| `WEBHOOK_SECRET` | Generic HMAC for any non-Polar webhooks (legacy/Polar-mirror) | Optional | various | **Yes** | — |
+| `AEE_APP_URL` | Frontend URL for Polar `success_url` | Recommended | `routes/billing.ts:188` (default `http://localhost:5173`) | No | `routes/billing.ts:147,188` |
+| `AEE_PUBLIC_URL` | Public API base for Polar callback URL | Recommended | `routes/billing.ts:154` (default `https://aurex-api.fly.dev`) | No | `routes/billing.ts:154` |
+| `AEE_FORCE_MOCK` | Force agents into MOCK mode. **Default false** | **Do NOT set to `true` in prod** unless intentional | `packages/agents/src/index.ts:479` | No | `agents/src/index.ts:479` |
+| `AEE_DEV_MODE` | Enables `X-User-Id` header auth (dev fallback). **Keep empty in prod** | No (empty in prod) | `context.ts:130` | No | `context.ts:127-134` |
+| `AEE_ADMIN_ENC_KEY` | AES-256-GCM key for AI-key encryption (admin only) | Required if admin stores AI keys | `crypto.ts` | **Yes** | — |
+| `GLM_API_KEY` / `KIMI_API_KEY` | LLM provider keys | Required unless `AEE_FORCE_MOCK=true` | `agents/src/index.ts` | **Yes** | `agents/src/index.ts:469-478` |
+| `GLM_MODEL` / `KIMI_MODEL` | Model names | Optional (defaults exist) | `agents/src/index.ts:470,476` | No | `agents/src/index.ts` |
 
-> These steps need `console.neon.tech` access. From this session the Neon console was
-> **not reachable / no credentials were provided**, so this is a runbook, not a claim.
+---
 
-### 4.1 Create the project + roles (mirror the dual-URL contract)
+## 2. Neon provisioning — exact steps
 
-1. `console.neon.tech` → **Create Project** → name `aurex-db`, region matching Fly
-   `primary_region = "sin"` (Neon Asia-Pacific regions: `aws-ap-southeast-1` ≈ Singapore).
-
-2. In **Dashboard → SQL Editor** (or `psql "$NEON_OWNER_URL"`), create the two roles
-   exactly like the current Fly Postgres:
-
-   ```sql
-   -- OWNER role (migrations + pg-boss) — Neon provided this as the default
-   -- "neondb_owner" role; the console "connection string" uses it.
-   -- RUNTIME role (API pool) — least privilege, mirror of aee_app:
-   CREATE ROLE aee_app LOGIN PASSWORD '<AEE_GENERATED_PASSWORD>';
-   GRANT CONNECT ON DATABASE neondb TO aee_app;
-   ```
-
-3. Because AEE uses a **post-migration grant model** (`migration 001` `REVOKE`s and
-   `GRANT`s to `aee_app`), the owner must run the migrations first. The runtime role
-   is then granted `SELECT, INSERT` on all tables by the migrations themselves.
-
-### 4.2 Get the two connection strings
-
-- **Owner URL** (migrations + pg-boss): console → **Connect** → *PostgreSQL* →
-  **Pooled connection** (port `5432`) — copy the string. Confirm it contains
-  `sslmode=require` (the app adds it automatically if missing) and the `neondb_owner` user.
-- **App URL** (runtime pool): same dialog but swap the user to `aee_app` and its password.
-  IMPORTANT: the app pool should use the **pooled** host for connection fan-out; if you
-  need transaction fixups / LISTEN-NOTIFY, use the **direct** (non-pooler) host for
-  `DATABASE_APP_URL`.
-
-### 4.3 Set Fly secrets (`fly.secrets` — do via `fly` CLI from a real shell)
-
+### 2.1 Create the Neon project (CLI)
 ```bash
-fly secrets set \
-  DATABASE_URL="postgresql://neondb_owner:...@ep-xxx-pooler.aws-ap-southeast-1.aws.neon.tech/neondb?sslmode=require" \
-  DATABASE_APP_URL="postgresql://aee_app:...@ep-xxx-pooler.aws-ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
+# One-time: create API key at console.neon.tech → Settings → API Keys
+export NEON_API_KEY=***        # do NOT echo or save to disk
+export NEON_ORG=<your-org-id>  # find via `neonctl projects list`
+
+neonctl projects create \
+  --name aurex-prod \
+  --region-id aws-ap-southeast-1 \
+  --pg-version 16
+
+# Note the returned project_id
+PROJ_ID=***   # paste from output
 ```
 
-The Fly machine redeploys on secret change (`serve-prod.ts` reads them at boot; it runs
-`run-migrations.ts` automatically → the schema migrates to Neon on first boot).
-
-### 4.4 Enable Neon branching for staging/preview (optional, recommended)
-
-- **Dashboard → Branch** → create `preview` branch from `main`. Point a Fly preview
-  machine's `DATABASE_URL`/`DATABASE_APP_URL` at the branch connection string. This gives
-  ephemeral DB per PR without touching prod data.
-
-## 5. Verification (after external config)
-
+### 2.2 Create the database
 ```bash
-# 1. Health: DB must report healthy (SSL + reachable)
-curl -s https://aurex-api.fly.dev/health
+neonctl databases create \
+  --project-id "$PROJ_ID" \
+  --name aee
+```
+The default `neondb` database is fine; explicit `aee` keeps the contract identical to Fly.
 
-# 2. Migration ledger: all 13 migrations applied
-wsl.exe -e bash -lc 'psql "$DATABASE_URL" -c "SELECT count(*) FROM schema_migrations;"'   # expect 13
+### 2.3 Create the two roles (dual-URL contract)
+```bash
+# Owner (DDL + pg-boss + worker)
+neonctl roles create \
+  --project-id "$PROJ_ID" \
+  --name neondb_owner
+# Note the auto-generated password (printed ONCE)
 
-# 3. Runtime role works (app pool) — login + create objective via the API cookie flow
-#    (canonical E2E):
-npx tsx scripts/e2e-canonical-cookie.ts   # expect 20/20 PASS
-
-# 4. Trigger + REVOKE still enforced on Neon:
-wsl.exe -e bash -lc 'psql "$DATABASE_APP_URL" -c "UPDATE capital_transactions SET amount=1"'
-#   expect: ERROR: permission denied for table capital_transactions
-
-# 5. Double-entry invariant (per-account balance nets to zero):
-wsl.exe -e bash -lc 'psql "$DATABASE_URL" -c "SELECT count(*) FROM capital_transactions WHERE debit_account=credit_account;"'  # expect 0
+# App runtime role (SELECT+INSERT on the runtime-granted tables; same as aee_app)
+neonctl roles create \
+  --project-id "$PROJ_ID" \
+  --name aee_app
+# Note the auto-generated password
 ```
 
-## 6. Rollback (reversible)
+### 2.4 Get the connection strings
+```bash
+# Pooled (recommended for the runtime API — Fly machine → Neon pooler)
+POOLED_OWNER=$(neonctl connection-string \
+  --project-id "$PROJ_ID" \
+  --role neondb_owner \
+  --pooled true)
 
-Point the same two secrets back at the Fly Postgres URLs and redeploy. The pool code
-auto-detects non-Neon hosts and drops SSL — no code change. (Data in the old Fly
-Postgres cluster is untouched; Neon `aurex-db` can be dropped after confirmation.)
+POOLED_APP=$(neonctl connection-string \
+  --project-id "$PROJ_ID" \
+  --role aee_app \
+  --pooled true)
 
-## 7. Known Neon specifics handled
+# Direct (migrations + pg-boss prefer a direct connection)
+DIRECT_OWNER=$(neonctl connection-string \
+  --project-id "$PROJ_ID" \
+  --role neondb_owner \
+  --pooled false)
+```
 
-| Concern | Resolution |
-|---|---|
-| TLS required | `poolConfigFor` auto-sets `ssl: { rejectUnauthorized: true }` for neon.tech hosts |
-| `sslmode=require` in URL | `neonNormalize` injects it if absent; idempotent |
-| pg-boss (raw connection string) | `serve-prod.ts` normalizes `ADMIN_URL` before `new pgBossCtor` |
-| Autosuspend cold start | `waitForDb` retries 30×, 5s apart; `ResilientPool` bounded-retries queries |
-| Connection fan-out | Use the **pooled** host for `DATABASE_APP_URL`; direct host only for LISTEN/NOTIFY |
-| Roles / least privilege | `aee_app` runtime role created post-migration; grants applied by migrations |
+### 2.5 Test connectivity from your local terminal
+```bash
+psql "$POOLED_OWNER" -c "SELECT version();"
+psql "$POOLED_APP"   -c "SELECT current_user, current_database();"
+```
+
+### 2.6 Apply migrations 001–013 (direct connection)
+```bash
+# Repo migration runner auto-discovers and is checksum+idempotent.
+# Run from repo root, with DIRECT_OWNER:
+DATABASE_URL="$DIRECT_OWNER" \
+  DATABASE_APP_URL="$POOLED_APP" \
+  npx tsx scripts/run-migrations.ts
+```
+
+Expected output: 13 applied (or fewer if some already at the target version; runner is
+idempotent by sha256 of the migration file).
+
+### 2.7 Verify schema
+```bash
+DATABASE_URL="$POOLED_OWNER" npx tsx scripts/verify-db.ts
+# Expect: 9/9 PASS, S2 = 13 migrations, S1 = 36 tables (auto-derived).
+```
+
+### 2.8 Migrate existing production data (Fly → Neon)
+**Pre-cutover baseline is already recorded** in `reports/aee-audit-report.md` (PHASE 3
+snapshot from 2026-08-27): 88 users, 88 orgs, 39 objectives, 14 opportunities, 7 experiments,
+9 decisions, 9 missions, 9 approvals, 2 execution_results, 114 events, 8 audit_logs,
+27 model_runs, sum_capital_approved 168.000.000,00, sum_target_profit 1.206.000.000,00.
+
+Export from Fly (the current prod DB):
+```bash
+# Using the aee_admin role that prod currently uses (digest c825553ec9022685):
+flyctl machine exec <aurex-api-machine-id> -a aurex-api -- \
+  bash -lc 'pg_dump --no-owner --no-privileges -t "public.*" \
+            "$DATABASE_URL"' > /tmp/aee-prod-dump.sql
+```
+
+Import to Neon (direct owner):
+```bash
+psql "$DIRECT_OWNER" -v ON_ERROR_STOP=1 -f /tmp/aee-prod-dump.sql
+```
+
+### 2.9 Validate integrity after import
+```bash
+# Compare against the pre-cutover baseline above. The exact query is the same
+# scripts/_prod-baseline.ts that produced the "before" snapshot.
+DATABASE_URL="$POOLED_OWNER" npx tsx scripts/_prod-baseline.ts
+# Expect: row counts and aggregates identical (or delta only if you intentionally
+# cleaned up test data after the snapshot).
+```
+
+### 2.10 Switch AUREX to Neon (controlled cutover)
+**Do not flip Fly secrets until §2.9 passes.**
+
+The two Fly secrets to update:
+```bash
+# Owner (for migrations + pg-boss)
+flyctl secrets set \
+  -a aurex-api \
+  DATABASE_URL="$POOLED_OWNER"
+
+# Runtime (aee_app / least-privilege)
+flyctl secrets set \
+  -a aurex-api \
+  DATABASE_APP_URL="$POOLED_APP"
+```
+
+Fly restarts the app on `secrets set` (this is the cutover). Watch:
+```bash
+flyctl logs -a aurex-api --follow
+```
+
+### 2.11 Rollback procedure
+If anything breaks within the first hour:
+```bash
+# Re-set the Fly secrets to the original Fly Postgres URLs.
+# These were captured in §0 (digest c825553ec9022685 for both).
+flyctl secrets set \
+  -a aurex-api \
+  DATABASE_URL="postgresql://aee_admin:<pw>@aurex-db.internal:5432/aee"
+flyctl secrets set \
+  -a aurex-api \
+  DATABASE_APP_URL="postgresql://aee_admin:<pw>@aurex-db.internal:5432/aee"
+# The old database is untouched, so a rollback is purely a secrets flip.
+```
+
+**Do not destroy the Fly `aurex-db` app** until the Neon cutover has been live and
+production-verified for at least 7 days. PHASE 10 covers that purge.
+
+---
+
+## 3. Neon-specific gotchas (read these before you act)
+
+- **SSL is mandatory.** The `neon.ts` `poolConfigFor` auto-injects `sslmode=require` + `ssl:
+  { rejectUnauthorized: true }` for any `*.neon.tech` / `*.neon.run` host. Your bare URL
+  string is fine — the code handles the rest. **Test it locally first** with the same env
+  before flipping Fly.
+- **Pooled vs direct.** Use the **pooled** connection for the runtime API (handles many
+  short requests). Use the **direct** connection for one-shot migrations. Don't mix them up.
+- **pg-boss.** The orchestrator queue (pg-boss) needs a stable connection — give it the
+  *direct* URL via `ADMIN_URL` (currently `serve-prod.ts` uses `ownerPool` which derives
+  from `DATABASE_URL`).
+- **Dual role.** The current prod uses ONE role (`aee_admin`) for both URLs. Neon should
+  use TWO roles. The migration 004 grants match the `aee_app` role; verify `aee_app`
+  gets the same `GRANT SELECT, INSERT` set on all 36 tables — and **no** `GRANT UPDATE`
+  on append-only tables (`audit_logs`, `events`, `model_runs`, `capital_transactions`).
+- **Idempotency.** All 13 migrations are idempotent (each uses `IF NOT EXISTS` / `DO $$
+  ... $$`). You can re-run `scripts/run-migrations.ts` against Neon as many times as
+  you want; only the new sha256s are applied.
